@@ -1,36 +1,17 @@
-name: OpenCode Auto Review
+name: OpenCode Auto PR Review
 
 on:
   pull_request:
     types: [opened, synchronize]
 
 jobs:
-  check-enabled:
-    name: Check if enabled
-    runs-on: ubuntu-latest
+  opencode-review:
     permissions:
       contents: read
-    outputs:
-      enabled: ${{ steps.check.outputs.enabled }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          sparse-checkout: .github
-
-      - name: Check workflow config
-        id: check
-        uses: ./.github/actions/check-workflow-enabled
-        with:
-          workflow-name: opencode-auto-review
-
-  auto-review:
-    needs: check-enabled
-    if: needs.check-enabled.outputs.enabled == 'true'
-    permissions:
-      contents: read
-      pull-requests: write
       issues: write
-    uses: jhw7500/automation/.github/workflows/opencode-auto-review.yml@v1.39
+      pull-requests: write
+    uses: jhw7500/automation/.github/workflows/opencode-auto-review.yml@f1b85510717a681b0db94fd2b764716372c52435
+    with:
+      pr_number: ${{ github.event.pull_request.number }}
     secrets:
       ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
