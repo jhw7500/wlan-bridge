@@ -10,8 +10,8 @@
 #
 # NOTE: GitHub Actions does not allow dynamic refs in `uses: ...@ref`, so this value
 # is used by a repo automation workflow that opens a PR updating all `uses:` refs.
-automation_ref: v1.71
-automation_commit: b24074e13d2e0530f141d37fcb9e3b000ab7fc7c
+automation_ref: v1.72
+automation_commit: b18f99256bc2bd41e4fc70c3025805b7682217a0
 
 # Global review behavior.
 # - manual triggers (e.g. @gemini-cli /review, @claude) should keep working regardless.
