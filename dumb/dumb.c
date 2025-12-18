@@ -36,11 +36,70 @@ static struct {
 
 static struct {
     pthread_t threads[2];
-    pcap_t *interfaces[2];
+    pcap_t *rx[2];
+    pcap_t *tx[2];
     atomic_int ready; // bit0: if0 ready, bit1: if1 ready
     pthread_mutex_t mutex;
     pthread_cond_t cond;
 } ifs;
+
+static int get_dispatch_budget(void)
+{
+    const char *env = getenv("DUMB_DISPATCH_BUDGET");
+    if (!env || !*env) {
+        return 64;
+    }
+    char *end = NULL;
+    long v = strtol(env, &end, 10);
+    if (!end || end == env || *end != '\0') {
+        return 64;
+    }
+    if (v < 1) return 1;
+    if (v > 4096) return 4096;
+    return (int)v;
+}
+
+static pcap_t *open_pcap_handle(const char *ifname, int is_rx, char errbuf[PCAP_ERRBUF_SIZE])
+{
+    pcap_t *h = pcap_create(ifname, errbuf);
+    if (!h) {
+        return NULL;
+    }
+
+    if (pcap_set_snaplen(h, DUMB_SNAPLEN) != 0) {
+        fprintf(stderr, "WARN: snaplen set failed on %s: %s\n", ifname, pcap_geterr(h));
+    }
+
+    if (is_rx) {
+        if (pcap_set_buffer_size(h, DUMB_PCAP_BUFFER_SIZE_BYTES) != 0) {
+            fprintf(stderr, "WARN: buffer size set failed on %s: %s\n", ifname, pcap_geterr(h));
+        }
+        if (pcap_set_promisc(h, 1) != 0) {
+            fprintf(stderr, "WARN: promisc set failed on %s: %s\n", ifname, pcap_geterr(h));
+        }
+        if (pcap_set_timeout(h, 1) != 0) { // 1ms timeout
+            fprintf(stderr, "WARN: timeout set failed on %s: %s\n", ifname, pcap_geterr(h));
+        }
+        if (pcap_set_immediate_mode(h, 1) != 0) {
+            fprintf(stderr, "WARN: immediate mode set failed on %s: %s\n", ifname, pcap_geterr(h));
+        }
+        // 일부 플랫폼에서는 activate 전에만 적용됨
+        if (pcap_setdirection(h, PCAP_D_IN) != 0) {
+            fprintf(stderr, "pcap_setdirection ignored on %s: %s\n", ifname, pcap_geterr(h));
+        }
+    }
+
+    int act_rc = pcap_activate(h);
+    if (act_rc < 0) {
+        fprintf(stderr, "FATAL: activate %s failed: %s\n", ifname, pcap_statustostr(act_rc));
+        pcap_close(h);
+        return NULL;
+    } else if (act_rc > 0) {
+        fprintf(stderr, "WARN: activate %s warning: %s\n", ifname, pcap_statustostr(act_rc));
+    }
+
+    return h;
+}
 
 static inline int both_ready(void) {
     int r = atomic_load_explicit(&ifs.ready, memory_order_acquire);
@@ -95,13 +154,13 @@ static void ph(unsigned char *ifp, const struct pcap_pkthdr *hdr, const unsigned
     atomic_fetch_add(&stats.rx_packets[i], 1);
 
     // 상대 인터페이스 준비 여부 확인
-    if (!both_ready() || ifs.interfaces[peer] == NULL) {
+    if (!both_ready() || ifs.tx[peer] == NULL) {
         atomic_fetch_add(&stats.dropped[i], 1);
         return; // 아직 준비 전이면 드롭
     }
 
     // snaplen에 의해 잘린(caplen < len) 패킷은 캡처된 길이만큼만 전달
-    int ret = pcap_inject(ifs.interfaces[peer], data, hdr->caplen);
+    int ret = pcap_inject(ifs.tx[peer], data, hdr->caplen);
     if (ret < 0) {
         // 에러 카운터 증가
         atomic_fetch_add(&stats.dropped[i], 1);
@@ -111,7 +170,7 @@ static void ph(unsigned char *ifp, const struct pcap_pkthdr *hdr, const unsigned
         static atomic_ulong error_count = 0;
         unsigned long err_cnt = atomic_fetch_add(&error_count, 1);
         if (err_cnt % 1000 == 0) { // 1000개마다 한 번만 로그
-            const char *err = pcap_geterr(ifs.interfaces[peer]);
+            const char *err = pcap_geterr(ifs.tx[peer]);
             fprintf(stderr, "pcap_inject(%u->%u) failed: %s (total errors: %lu)\n",
                     i, peer, err ? err : "unknown", err_cnt + 1);
         }
@@ -144,11 +203,6 @@ static void *thr(void *ifp)
         fprintf(stderr, "Thread %u set to SCHED_FIFO priority 50\n", i);
     }
 
-    // 입력 전용으로 설정 (장치가 지원 안 하면 무시될 수 있음)
-    if (pcap_setdirection(ifs.interfaces[i], PCAP_D_IN) != 0) {
-        fprintf(stderr, "pcap_setdirection(%u) ignored: %s\n", i, pcap_geterr(ifs.interfaces[i]));
-    }
-
     // 본인 준비 플래그 set 및 condition variable로 통지
     pthread_mutex_lock(&ifs.mutex);
     atomic_fetch_or_explicit(&ifs.ready, (1 << i), memory_order_release);
@@ -163,11 +217,12 @@ static void *thr(void *ifp)
     fprintf(stderr, "Thread %u: both interfaces ready, starting packet forwarding\n", i);
 
     // pcap_loop 대신 dispatch를 사용하여 keep_running 체크 가능하게 함
+    const int budget = get_dispatch_budget();
     int stats_check_counter = 0;
     while (keep_running) {
-        int rc = pcap_dispatch(ifs.interfaces[i], -1, ph, (unsigned char *)ifp);
+        int rc = pcap_dispatch(ifs.rx[i], budget, ph, (unsigned char *)ifp);
         if (rc == PCAP_ERROR) {
-            const char *err = pcap_geterr(ifs.interfaces[i]);
+            const char *err = pcap_geterr(ifs.rx[i]);
             fprintf(stderr, "pcap_dispatch(%u) error: %s\n", i, err ? err : "unknown");
             keep_running = 0;
             break;
@@ -179,7 +234,7 @@ static void *thr(void *ifp)
         if (++stats_check_counter >= 1000) {
             stats_check_counter = 0;
             struct pcap_stat pstat;
-            if (pcap_stats(ifs.interfaces[i], &pstat) == 0) {
+            if (pcap_stats(ifs.rx[i], &pstat) == 0) {
                 atomic_store(&stats.pcap_drop[i], pstat.ps_drop + pstat.ps_ifdrop);
             }
         }
@@ -191,9 +246,13 @@ static void *thr(void *ifp)
 
 static void cleanup(void) {
     for (int i = 0; i < 2; i++) {
-        if (ifs.interfaces[i]) {
-            pcap_close(ifs.interfaces[i]);
-            ifs.interfaces[i] = NULL;
+        if (ifs.rx[i]) {
+            pcap_close(ifs.rx[i]);
+            ifs.rx[i] = NULL;
+        }
+        if (ifs.tx[i]) {
+            pcap_close(ifs.tx[i]);
+            ifs.tx[i] = NULL;
         }
     }
 
@@ -224,7 +283,8 @@ int main(int argc, char **argv)
     stats.start_time = time(NULL);
 
     atomic_init(&ifs.ready, 0);
-    memset(ifs.interfaces, 0, sizeof(ifs.interfaces));
+    memset(ifs.rx, 0, sizeof(ifs.rx));
+    memset(ifs.tx, 0, sizeof(ifs.tx));
 
     // Mutex 및 condition variable 초기화
     if (pthread_mutex_init(&ifs.mutex, NULL) != 0) {
@@ -239,36 +299,15 @@ int main(int argc, char **argv)
 
     // 1) 두 인터페이스를 모두 연다
     for (int i = 0; i < 2; ++i) {
-        ifs.interfaces[i] = pcap_create(argv[i + 1], errbuf);
-        if (!ifs.interfaces[i]) {
-            fprintf(stderr, "FATAL: create %s failed: %s\n", argv[i + 1], errbuf);
+        ifs.rx[i] = open_pcap_handle(argv[i + 1], 1, errbuf);
+        if (!ifs.rx[i]) {
+            cleanup();
             return 1;
         }
-
-        // 활성화 이전 설정들: 캡처 지연 최소화를 위해 즉시 모드 on, 큰 스냅렌스 유지
-        if (pcap_set_snaplen(ifs.interfaces[i], DUMB_SNAPLEN) != 0) {
-            fprintf(stderr, "WARN: snaplen set failed on %s: %s\n", argv[i + 1], pcap_geterr(ifs.interfaces[i]));
-        }
-        if (pcap_set_buffer_size(ifs.interfaces[i], DUMB_PCAP_BUFFER_SIZE_BYTES) != 0) {
-            fprintf(stderr, "WARN: buffer size set failed on %s: %s\n", argv[i + 1], pcap_geterr(ifs.interfaces[i]));
-        }
-        if (pcap_set_promisc(ifs.interfaces[i], 1) != 0) {
-            fprintf(stderr, "WARN: promisc set failed on %s: %s\n", argv[i + 1], pcap_geterr(ifs.interfaces[i]));
-        }
-        if (pcap_set_timeout(ifs.interfaces[i], 1) != 0) { // 1ms timeout
-            fprintf(stderr, "WARN: timeout set failed on %s: %s\n", argv[i + 1], pcap_geterr(ifs.interfaces[i]));
-        }
-        if (pcap_set_immediate_mode(ifs.interfaces[i], 1) != 0) {
-            fprintf(stderr, "WARN: immediate mode set failed on %s: %s\n", argv[i + 1], pcap_geterr(ifs.interfaces[i]));
-        }
-
-        int act_rc = pcap_activate(ifs.interfaces[i]);
-        if (act_rc < 0) {
-            fprintf(stderr, "FATAL: activate %s failed: %s\n", argv[i + 1], pcap_statustostr(act_rc));
+        ifs.tx[i] = open_pcap_handle(argv[i + 1], 0, errbuf);
+        if (!ifs.tx[i]) {
+            cleanup();
             return 1;
-        } else if (act_rc > 0) {
-            // non-fatal warning from libpcap (e.g., promisc not supported)
-            fprintf(stderr, "WARN: activate %s warning: %s\n", argv[i + 1], pcap_statustostr(act_rc));
         }
     }
 
@@ -303,8 +342,8 @@ int main(int argc, char **argv)
 
     // pcap_breakloop으로 스레드 깨우기
     for (int i = 0; i < 2; i++) {
-        if (ifs.interfaces[i]) {
-            pcap_breakloop(ifs.interfaces[i]);
+        if (ifs.rx[i]) {
+            pcap_breakloop(ifs.rx[i]);
         }
     }
 
