@@ -196,7 +196,7 @@ static void *interface_thread(void *arg) {
     if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp) != 0) {
         fprintf(stderr, "WARNING: pthread_setschedparam(%u) failed: %s\n", idx, strerror(errno));
     } else {
-        fprintf(stderr, "Thread %u set to SCHED_FIFO priority 50\n", idx, idx);
+        fprintf(stderr, "Thread %u set to SCHED_FIFO priority 50\n", idx);
     }
 
     fprintf(stderr, "Thread %u: RX from %s, TX to %s\n", idx, rx_iface->name, tx_iface->name);
