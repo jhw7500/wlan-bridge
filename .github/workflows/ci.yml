@@ -22,4 +22,4 @@ jobs:
           gcc -std=c11 -O2 -Wall -Wextra -pthread \
             dumb/dumb.c \
             -lpcap \
-            -o dumb
+            -o dumb-bridge
