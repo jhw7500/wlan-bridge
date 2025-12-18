@@ -47,6 +47,14 @@ static struct {
 #define FRAME_NR ((BLOCK_SIZE * BLOCK_NR) / FRAME_SIZE)
 #define RETIRE_TIMEOUT_MS 2            // low-traffic 레이턴시 개선(기본 64ms -> 2ms)
 
+// TX_RING 설정(TPACKET_V2 기반)
+// - TPACKET_V3는 RX 쪽에 유리하고, TX_RING은 커널/환경에 따라 V2가 가장 호환성이 좋음
+// - TX_RING 실패 시 sendto()로 자동 fallback
+#define TX_BLOCK_SIZE (64 * 1024)
+#define TX_FRAME_SIZE 2048
+#define TX_BLOCK_NR 64                 // 4MB
+#define TX_FRAME_NR ((TX_BLOCK_SIZE * TX_BLOCK_NR) / TX_FRAME_SIZE)
+
 // Interface 구조체
 struct interface {
     char name[IFNAMSIZ];
@@ -56,6 +64,11 @@ struct interface {
     void *ring_rx;       // mmap'd RX ring buffer
     size_t ring_size;
     struct tpacket_req3 req;
+    // TX ring (optional)
+    void *ring_tx;
+    size_t ring_tx_size;
+    struct tpacket_req tx_req;
+    unsigned int tx_frame_idx;
     pthread_t thread;
 };
 
@@ -185,6 +198,96 @@ static int setup_rx_ring(struct interface *iface) {
     return 0;
 }
 
+static int setup_tx_ring(struct interface *iface)
+{
+    // TX_RING은 TPACKET_V2로 호환성 확보
+    int version = TPACKET_V2;
+    if (setsockopt(iface->sock_tx, SOL_PACKET, PACKET_VERSION, &version, sizeof(version)) < 0) {
+        fprintf(stderr, "WARNING: setsockopt(PACKET_VERSION=TPACKET_V2) failed on %s: %s\n", iface->name, strerror(errno));
+        return -1;
+    }
+
+    memset(&iface->tx_req, 0, sizeof(iface->tx_req));
+    iface->tx_req.tp_block_size = TX_BLOCK_SIZE;
+    iface->tx_req.tp_frame_size = TX_FRAME_SIZE;
+    iface->tx_req.tp_block_nr = TX_BLOCK_NR;
+    iface->tx_req.tp_frame_nr = TX_FRAME_NR;
+
+    if (setsockopt(iface->sock_tx, SOL_PACKET, PACKET_TX_RING, &iface->tx_req, sizeof(iface->tx_req)) < 0) {
+        fprintf(stderr, "WARNING: setsockopt(PACKET_TX_RING) failed on %s: %s\n", iface->name, strerror(errno));
+        return -1;
+    }
+
+    iface->ring_tx_size = (size_t)iface->tx_req.tp_block_size * (size_t)iface->tx_req.tp_block_nr;
+    iface->ring_tx = mmap(NULL, iface->ring_tx_size, PROT_READ | PROT_WRITE, MAP_SHARED, iface->sock_tx, 0);
+    if (iface->ring_tx == MAP_FAILED) {
+        iface->ring_tx = NULL;
+        fprintf(stderr, "WARNING: mmap(TX_RING) failed on %s: %s\n", iface->name, strerror(errno));
+        return -1;
+    }
+
+    iface->tx_frame_idx = 0;
+
+    fprintf(stderr,
+            "Interface %s: TX_RING setup complete (%zu bytes, %u blocks)\n",
+            iface->name,
+            iface->ring_tx_size,
+            iface->tx_req.tp_block_nr);
+
+    return 0;
+}
+
+static inline struct tpacket2_hdr *tx_frame_ptr(const struct interface *iface, unsigned int frame_idx)
+{
+    return (struct tpacket2_hdr *)((uint8_t *)iface->ring_tx + (frame_idx * iface->tx_req.tp_frame_size));
+}
+
+static int tx_ring_enqueue(unsigned int tx_idx, struct interface *tx_iface, const uint8_t *pkt, uint32_t pkt_len)
+{
+    if (!tx_iface->ring_tx) {
+        return -1;
+    }
+
+    struct tpacket2_hdr *hdr = tx_frame_ptr(tx_iface, tx_iface->tx_frame_idx);
+
+    // 사용 가능한 프레임이 아니면 드롭(또는 바쁜 대기할 수 있지만, 레이턴시 우선으로 드롭)
+    if ((hdr->tp_status & TP_STATUS_AVAILABLE) == 0) {
+        atomic_fetch_add(&stats.ring_full[tx_idx], 1);
+        return -2;
+    }
+
+    const uint32_t data_off = (uint32_t)(TPACKET2_HDRLEN - sizeof(struct sockaddr_ll));
+    const uint32_t max_data_len = (uint32_t)tx_iface->tx_req.tp_frame_size - data_off;
+    uint8_t *data = (uint8_t *)hdr + data_off;
+    if (pkt_len > max_data_len) {
+        return -3;
+    }
+
+    memcpy(data, pkt, pkt_len);
+    hdr->tp_len = pkt_len;
+    hdr->tp_snaplen = pkt_len;
+    hdr->tp_mac = data_off;
+    hdr->tp_net = data_off;
+    hdr->tp_status = TP_STATUS_SEND_REQUEST;
+
+    // 다음 프레임으로
+    tx_iface->tx_frame_idx = (tx_iface->tx_frame_idx + 1) % tx_iface->tx_req.tp_frame_nr;
+
+    return 0;
+}
+
+static int tx_ring_flush(struct interface *tx_iface)
+{
+    if (!tx_iface->ring_tx) {
+        return 0;
+    }
+    // 커널에 전송 요청 flush (0바이트 send)
+    if (send(tx_iface->sock_tx, NULL, 0, 0) < 0) {
+        return -1;
+    }
+    return 0;
+}
+
 // RX/TX 스레드
 static void *interface_thread(void *arg) {
     unsigned int idx = (unsigned int)((uintptr_t)arg);
@@ -242,6 +345,7 @@ static void *interface_thread(void *arg) {
         unsigned int num_pkts = pbd->hdr.bh1.num_pkts;
         struct tpacket3_hdr *ppd = (struct tpacket3_hdr *)((uint8_t *)pbd + pbd->hdr.bh1.offset_to_first_pkt);
 
+        int tx_flush_needed = 0;
         for (unsigned int i = 0; i < num_pkts; i++) {
             // 패킷 데이터
             uint8_t *pkt_data = (uint8_t *)ppd + ppd->tp_mac;
@@ -252,37 +356,53 @@ static void *interface_thread(void *arg) {
 
             // TX (sendto)
             const struct ethhdr *eh = (const struct ethhdr *)pkt_data;
-            struct sockaddr_ll dest_addr;
-            memset(&dest_addr, 0, sizeof(dest_addr));
-            dest_addr.sll_family = AF_PACKET;
-            dest_addr.sll_protocol = eh->h_proto;
-            dest_addr.sll_ifindex = tx_iface->ifindex;
-            dest_addr.sll_halen = ETH_ALEN;
-            memcpy(dest_addr.sll_addr, eh->h_dest, ETH_ALEN);
+            int tx_rc = tx_ring_enqueue(idx ^ 1, tx_iface, pkt_data, pkt_len);
+            if (tx_rc == 0) {
+                atomic_fetch_add(&stats.tx_packets[idx ^ 1], 1);
+                tx_flush_needed = 1;
+            } else if (tx_rc == -1) {
+                // TX_RING 미사용: sendto() fallback
+                struct sockaddr_ll dest_addr;
+                memset(&dest_addr, 0, sizeof(dest_addr));
+                dest_addr.sll_family = AF_PACKET;
+                dest_addr.sll_protocol = eh->h_proto;
+                dest_addr.sll_ifindex = tx_iface->ifindex;
+                dest_addr.sll_halen = ETH_ALEN;
+                memcpy(dest_addr.sll_addr, eh->h_dest, ETH_ALEN);
 
-            ssize_t sent = sendto(tx_iface->sock_tx, pkt_data, pkt_len, 0,
-                                  (struct sockaddr *)&dest_addr, sizeof(dest_addr));
-            if (sent < 0) {
-                atomic_fetch_add(&stats.dropped[idx], 1);
-                atomic_fetch_add(&stats.errors[idx ^ 1], 1);
+                ssize_t sent = sendto(tx_iface->sock_tx, pkt_data, pkt_len, 0,
+                                      (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+                if (sent < 0) {
+                    atomic_fetch_add(&stats.dropped[idx], 1);
+                    atomic_fetch_add(&stats.errors[idx ^ 1], 1);
 
-                // 너무 많은 오류 로그로 flood 되는 것을 막기 위해 rate-limit
-                static atomic_ulong send_err_count[2];
-                unsigned long err_cnt = atomic_fetch_add(&send_err_count[idx], 1) + 1;
-                if (err_cnt == 1 || (err_cnt % 1000) == 0) {
-                    fprintf(stderr,
-                            "sendto(%s->%s) failed (count=%lu): %s\n",
-                            rx_iface->name,
-                            tx_iface->name,
-                            err_cnt,
-                            strerror(errno));
+                    static atomic_ulong send_err_count[2];
+                    unsigned long err_cnt = atomic_fetch_add(&send_err_count[idx], 1) + 1;
+                    if (err_cnt == 1 || (err_cnt % 1000) == 0) {
+                        fprintf(stderr,
+                                "sendto(%s->%s) failed (count=%lu): %s\n",
+                                rx_iface->name,
+                                tx_iface->name,
+                                err_cnt,
+                                strerror(errno));
+                    }
+                } else {
+                    atomic_fetch_add(&stats.tx_packets[idx ^ 1], 1);
                 }
             } else {
-                atomic_fetch_add(&stats.tx_packets[idx ^ 1], 1);
+                // TX_RING 사용 중이지만 프레임이 없거나 전송 flush 실패 등
+                atomic_fetch_add(&stats.dropped[idx], 1);
+                atomic_fetch_add(&stats.errors[idx ^ 1], 1);
             }
 
             // 다음 패킷으로
             ppd = (struct tpacket3_hdr *)((uint8_t *)ppd + ppd->tp_next_offset);
+        }
+
+        if (tx_flush_needed) {
+            if (tx_ring_flush(tx_iface) != 0) {
+                atomic_fetch_add(&stats.errors[idx ^ 1], 1);
+            }
         }
 
         // Block을 커널에 반환
@@ -339,6 +459,11 @@ int main(int argc, char **argv) {
         if (setup_rx_ring(&interfaces[i]) < 0) {
             return 1;
         }
+
+        // TX_RING 설정(실패하면 sendto fallback)
+        if (setup_tx_ring(&interfaces[i]) < 0) {
+            fprintf(stderr, "WARNING: %s TX_RING disabled, falling back to sendto()\n", interfaces[i].name);
+        }
     }
 
     // 스레드 생성
@@ -376,6 +501,9 @@ int main(int argc, char **argv) {
     for (int i = 0; i < 2; i++) {
         if (interfaces[i].ring_rx) {
             munmap(interfaces[i].ring_rx, interfaces[i].ring_size);
+        }
+        if (interfaces[i].ring_tx) {
+            munmap(interfaces[i].ring_tx, interfaces[i].ring_tx_size);
         }
         if (interfaces[i].sock_rx >= 0) {
             close(interfaces[i].sock_rx);
