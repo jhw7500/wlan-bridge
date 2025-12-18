@@ -160,6 +160,13 @@ static int setup_rx_ring(struct interface *iface) {
         return -1;
     }
 
+    // Outgoing 프레임을 다시 캡처해 재전송하는 루프를 줄이기 위해(지원되는 경우)
+    int ignore_outgoing = 1;
+    if (setsockopt(iface->sock_rx, SOL_PACKET, PACKET_IGNORE_OUTGOING, &ignore_outgoing, sizeof(ignore_outgoing)) < 0) {
+        // 커널/헤더에 따라 미지원일 수 있으니 경고만
+        fprintf(stderr, "WARNING: PACKET_IGNORE_OUTGOING failed on %s: %s\n", iface->name, strerror(errno));
+    }
+
     fprintf(stderr, "Interface %s: TPACKET_V3 ring setup complete (%zu bytes, %u blocks)\n",
             iface->name, iface->ring_size, iface->req.tp_block_nr);
 
@@ -245,7 +252,7 @@ static void *interface_thread(void *arg) {
             struct sockaddr_ll dest_addr;
             memset(&dest_addr, 0, sizeof(dest_addr));
             dest_addr.sll_family = AF_PACKET;
-            dest_addr.sll_protocol = htons(ETH_P_ALL);
+            dest_addr.sll_protocol = eh->h_proto;
             dest_addr.sll_ifindex = tx_iface->ifindex;
             dest_addr.sll_halen = ETH_ALEN;
             memcpy(dest_addr.sll_addr, eh->h_dest, ETH_ALEN);
@@ -255,6 +262,18 @@ static void *interface_thread(void *arg) {
             if (sent < 0) {
                 atomic_fetch_add(&stats.dropped[idx], 1);
                 atomic_fetch_add(&stats.errors[idx ^ 1], 1);
+
+                // 너무 많은 오류 로그로 flood 되는 것을 막기 위해 rate-limit
+                static atomic_ulong send_err_count[2];
+                unsigned long err_cnt = atomic_fetch_add(&send_err_count[idx], 1) + 1;
+                if (err_cnt == 1 || (err_cnt % 1000) == 0) {
+                    fprintf(stderr,
+                            "sendto(%s->%s) failed (count=%lu): %s\n",
+                            rx_iface->name,
+                            tx_iface->name,
+                            err_cnt,
+                            strerror(errno));
+                }
             } else {
                 atomic_fetch_add(&stats.tx_packets[idx ^ 1], 1);
             }
