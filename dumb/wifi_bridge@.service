@@ -1,0 +1,31 @@
+[Unit]
+Description=Wifi Bridge Service for %i
+BindsTo=sys-subsystem-net-devices-eth0.device sys-subsystem-net-devices-%i.device
+Requires=sys-subsystem-net-devices-eth0.device sys-subsystem-net-devices-%i.device
+After=sys-subsystem-net-devices-eth0.device sys-subsystem-net-devices-%i.device
+Wants=network-online.target
+StartLimitIntervalSec=30
+StartLimitBurst=10
+StartLimitAction=reboot
+
+[Service]
+Type=simple
+ExecStart=/usr/local/scripts/wifi_bridge.sh %i
+ExecStop=/usr/local/scripts/wifi_bridge_stop.sh %i
+ExecStopPost=/bin/sleep 1
+Restart=always
+#Restart=on-failure
+RestartSec=1s
+
+# Capabilities for dumb bridge (mlockall + RT scheduling + network)
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN CAP_SYS_NICE CAP_IPC_LOCK
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN CAP_SYS_NICE CAP_IPC_LOCK
+NoNewPrivileges=yes
+
+# Resource limits for mlockall() and RT scheduling
+LimitMEMLOCK=infinity
+LimitSTACK=16777216
+LimitRTPRIO=50
+
+[Install]
+WantedBy=multi-user.target
