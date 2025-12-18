@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <getopt.h>
 #include <sched.h>
 #include <sys/mman.h>
 #include <syslog.h>
@@ -34,6 +35,19 @@ static struct {
 #define DUMB_SNAPLEN 1600
 #define DUMB_PCAP_BUFFER_SIZE_BYTES (4 * 1024 * 1024)
 
+struct config {
+    int dispatch_budget;
+    int enable_affinity;
+    int enable_rt;
+    int rt_priority;
+    int enable_mlock;
+    int snaplen;
+    int pcap_buffer_bytes;
+    int timeout_ms;
+    int enable_immediate;
+    int enable_promisc;
+};
+
 static struct {
     pthread_t threads[2];
     pcap_t *rx[2];
@@ -43,20 +57,73 @@ static struct {
     pthread_cond_t cond;
 } ifs;
 
-static int get_dispatch_budget(void)
+static struct config cfg;
+
+static int env_to_int(const char *key, int default_value)
 {
-    const char *env = getenv("DUMB_DISPATCH_BUDGET");
+    const char *env = getenv(key);
     if (!env || !*env) {
-        return 64;
+        return default_value;
     }
     char *end = NULL;
     long v = strtol(env, &end, 10);
     if (!end || end == env || *end != '\0') {
-        return 64;
+        return default_value;
     }
-    if (v < 1) return 1;
-    if (v > 4096) return 4096;
     return (int)v;
+}
+
+static int clamp_int(int v, int min_v, int max_v)
+{
+    if (v < min_v) return min_v;
+    if (v > max_v) return max_v;
+    return v;
+}
+
+static int get_dispatch_budget(void)
+{
+    return clamp_int(cfg.dispatch_budget, 1, 4096);
+}
+
+static void print_usage(FILE *out, const char *prog)
+{
+    fprintf(out,
+            "Usage: %s [options] <interface0> <interface1>\n"
+            "\n"
+            "Options (CLI overrides env; env overrides defaults):\n"
+            "  --dispatch-budget N     Max packets per dispatch (env DUMB_DISPATCH_BUDGET, default 64)\n"
+            "  --no-affinity           Disable CPU pinning (env DUMB_AFFINITY=0, default enabled)\n"
+            "  --no-rt                 Disable SCHED_FIFO (env DUMB_RT=0, default enabled)\n"
+            "  --rt-priority N         SCHED_FIFO priority (env DUMB_RT_PRIORITY, default 50)\n"
+            "  --no-mlock              Disable mlockall (env DUMB_MLOCK=0, default enabled)\n"
+            "  --snaplen N             pcap snaplen bytes (env DUMB_SNAPLEN, default 1600)\n"
+            "  --pcap-buffer BYTES     pcap RX buffer bytes (env DUMB_PCAP_BUFFER, default 4194304)\n"
+            "  --timeout-ms N          pcap timeout ms (env DUMB_TIMEOUT_MS, default 1)\n"
+            "  --no-immediate          Disable immediate mode (env DUMB_IMMEDIATE=0, default enabled)\n"
+            "  --no-promisc            Disable promisc (env DUMB_PROMISC=0, default enabled; may break bridging)\n"
+            "  -h, --help              Show help\n",
+            prog);
+}
+
+static void init_config_from_env(void)
+{
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.dispatch_budget = env_to_int("DUMB_DISPATCH_BUDGET", 64);
+    cfg.enable_affinity = env_to_int("DUMB_AFFINITY", 1) ? 1 : 0;
+    cfg.enable_rt = env_to_int("DUMB_RT", 1) ? 1 : 0;
+    cfg.rt_priority = env_to_int("DUMB_RT_PRIORITY", 50);
+    cfg.enable_mlock = env_to_int("DUMB_MLOCK", 1) ? 1 : 0;
+    cfg.snaplen = env_to_int("DUMB_SNAPLEN", DUMB_SNAPLEN);
+    cfg.pcap_buffer_bytes = env_to_int("DUMB_PCAP_BUFFER", DUMB_PCAP_BUFFER_SIZE_BYTES);
+    cfg.timeout_ms = env_to_int("DUMB_TIMEOUT_MS", 1);
+    cfg.enable_immediate = env_to_int("DUMB_IMMEDIATE", 1) ? 1 : 0;
+    cfg.enable_promisc = env_to_int("DUMB_PROMISC", 1) ? 1 : 0;
+
+    cfg.dispatch_budget = clamp_int(cfg.dispatch_budget, 1, 4096);
+    cfg.rt_priority = clamp_int(cfg.rt_priority, 1, 99);
+    cfg.snaplen = clamp_int(cfg.snaplen, 64, 65535);
+    cfg.pcap_buffer_bytes = clamp_int(cfg.pcap_buffer_bytes, 256 * 1024, 64 * 1024 * 1024);
+    cfg.timeout_ms = clamp_int(cfg.timeout_ms, 0, 1000);
 }
 
 static pcap_t *open_pcap_handle(const char *ifname, int is_rx, char errbuf[PCAP_ERRBUF_SIZE])
@@ -66,22 +133,24 @@ static pcap_t *open_pcap_handle(const char *ifname, int is_rx, char errbuf[PCAP_
         return NULL;
     }
 
-    if (pcap_set_snaplen(h, DUMB_SNAPLEN) != 0) {
+    if (pcap_set_snaplen(h, cfg.snaplen) != 0) {
         fprintf(stderr, "WARN: snaplen set failed on %s: %s\n", ifname, pcap_geterr(h));
     }
 
     if (is_rx) {
-        if (pcap_set_buffer_size(h, DUMB_PCAP_BUFFER_SIZE_BYTES) != 0) {
+        if (pcap_set_buffer_size(h, cfg.pcap_buffer_bytes) != 0) {
             fprintf(stderr, "WARN: buffer size set failed on %s: %s\n", ifname, pcap_geterr(h));
         }
-        if (pcap_set_promisc(h, 1) != 0) {
+        if (pcap_set_promisc(h, cfg.enable_promisc ? 1 : 0) != 0) {
             fprintf(stderr, "WARN: promisc set failed on %s: %s\n", ifname, pcap_geterr(h));
         }
-        if (pcap_set_timeout(h, 1) != 0) { // 1ms timeout
+        if (pcap_set_timeout(h, cfg.timeout_ms) != 0) { // ms timeout
             fprintf(stderr, "WARN: timeout set failed on %s: %s\n", ifname, pcap_geterr(h));
         }
-        if (pcap_set_immediate_mode(h, 1) != 0) {
-            fprintf(stderr, "WARN: immediate mode set failed on %s: %s\n", ifname, pcap_geterr(h));
+        if (cfg.enable_immediate) {
+            if (pcap_set_immediate_mode(h, 1) != 0) {
+                fprintf(stderr, "WARN: immediate mode set failed on %s: %s\n", ifname, pcap_geterr(h));
+            }
         }
     }
 
@@ -188,22 +257,26 @@ static void *thr(void *ifp)
     }
 
     // CPU affinity 설정: 인터페이스별로 전용 코어 할당
-    cpu_set_t cpuset;
-    CPU_ZERO(&cpuset);
-    CPU_SET(i, &cpuset); // if0 -> CPU0, if1 -> CPU1
-    if (pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset) != 0) {
-        fprintf(stderr, "WARNING: pthread_setaffinity_np(%u) failed: %s\n", i, strerror(errno));
-    } else {
-        fprintf(stderr, "Thread %u pinned to CPU %u\n", i, i);
+    if (cfg.enable_affinity) {
+        cpu_set_t cpuset;
+        CPU_ZERO(&cpuset);
+        CPU_SET(i, &cpuset); // if0 -> CPU0, if1 -> CPU1
+        if (pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset) != 0) {
+            fprintf(stderr, "WARNING: pthread_setaffinity_np(%u) failed: %s\n", i, strerror(errno));
+        } else {
+            fprintf(stderr, "Thread %u pinned to CPU %u\n", i, i);
+        }
     }
 
     // Real-time 스케줄링 설정: SCHED_FIFO priority 50
-    struct sched_param sp = {.sched_priority = 50};
-    if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp) != 0) {
-        fprintf(stderr, "WARNING: pthread_setschedparam(%u) failed: %s (need CAP_SYS_NICE or root)\n",
-                i, strerror(errno));
-    } else {
-        fprintf(stderr, "Thread %u set to SCHED_FIFO priority 50\n", i);
+    if (cfg.enable_rt) {
+        struct sched_param sp = {.sched_priority = cfg.rt_priority};
+        if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp) != 0) {
+            fprintf(stderr, "WARNING: pthread_setschedparam(%u) failed: %s (need CAP_SYS_NICE or root)\n",
+                    i, strerror(errno));
+        } else {
+            fprintf(stderr, "Thread %u set to SCHED_FIFO priority %d\n", i, cfg.rt_priority);
+        }
     }
 
     // 본인 준비 플래그 set 및 condition variable로 통지
@@ -268,10 +341,71 @@ int main(int argc, char **argv)
 {
     char errbuf[PCAP_ERRBUF_SIZE];
 
-    if (argc != 3) {
-        fprintf(stderr, "Usage: %s <interface0> <interface1>\n", argv[0]);
+    init_config_from_env();
+
+    static struct option long_opts[] = {
+        {"dispatch-budget", required_argument, 0, 1},
+        {"no-affinity", no_argument, 0, 2},
+        {"no-rt", no_argument, 0, 3},
+        {"rt-priority", required_argument, 0, 4},
+        {"no-mlock", no_argument, 0, 5},
+        {"snaplen", required_argument, 0, 6},
+        {"pcap-buffer", required_argument, 0, 7},
+        {"timeout-ms", required_argument, 0, 8},
+        {"no-immediate", no_argument, 0, 9},
+        {"no-promisc", no_argument, 0, 10},
+        {"help", no_argument, 0, 'h'},
+        {0, 0, 0, 0},
+    };
+
+    int opt;
+    while ((opt = getopt_long(argc, argv, "h", long_opts, NULL)) != -1) {
+        switch (opt) {
+        case 1:
+            cfg.dispatch_budget = clamp_int(atoi(optarg), 1, 4096);
+            break;
+        case 2:
+            cfg.enable_affinity = 0;
+            break;
+        case 3:
+            cfg.enable_rt = 0;
+            break;
+        case 4:
+            cfg.rt_priority = clamp_int(atoi(optarg), 1, 99);
+            break;
+        case 5:
+            cfg.enable_mlock = 0;
+            break;
+        case 6:
+            cfg.snaplen = clamp_int(atoi(optarg), 64, 65535);
+            break;
+        case 7:
+            cfg.pcap_buffer_bytes = clamp_int(atoi(optarg), 256 * 1024, 64 * 1024 * 1024);
+            break;
+        case 8:
+            cfg.timeout_ms = clamp_int(atoi(optarg), 0, 1000);
+            break;
+        case 9:
+            cfg.enable_immediate = 0;
+            break;
+        case 10:
+            cfg.enable_promisc = 0;
+            break;
+        case 'h':
+            print_usage(stdout, argv[0]);
+            return 0;
+        default:
+            print_usage(stderr, argv[0]);
+            return 1;
+        }
+    }
+
+    if (argc - optind != 2) {
+        print_usage(stderr, argv[0]);
         return 1;
     }
+    const char *if0 = argv[optind];
+    const char *if1 = argv[optind + 1];
 
     // syslog 초기화
     openlog("dumb-bridge", LOG_PID | LOG_CONS, LOG_DAEMON);
@@ -302,12 +436,13 @@ int main(int argc, char **argv)
 
     // 1) 두 인터페이스를 모두 연다
     for (int i = 0; i < 2; ++i) {
-        ifs.rx[i] = open_pcap_handle(argv[i + 1], 1, errbuf);
+        const char *ifname = (i == 0) ? if0 : if1;
+        ifs.rx[i] = open_pcap_handle(ifname, 1, errbuf);
         if (!ifs.rx[i]) {
             cleanup();
             return 1;
         }
-        ifs.tx[i] = open_pcap_handle(argv[i + 1], 0, errbuf);
+        ifs.tx[i] = open_pcap_handle(ifname, 0, errbuf);
         if (!ifs.tx[i]) {
             cleanup();
             return 1;
@@ -324,11 +459,13 @@ int main(int argc, char **argv)
     }
 
     // 3) 스레드 생성 후 메모리 잠금 (더 안전함)
-    if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0) {
-        fprintf(stderr, "WARNING: mlockall() failed: %s (need CAP_IPC_LOCK or root)\n", strerror(errno));
-        fprintf(stderr, "         Continuing without memory locking (performance may be affected)\n");
-    } else {
-        fprintf(stderr, "Memory locked to prevent page faults\n");
+    if (cfg.enable_mlock) {
+        if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0) {
+            fprintf(stderr, "WARNING: mlockall() failed: %s (need CAP_IPC_LOCK or root)\n", strerror(errno));
+            fprintf(stderr, "         Continuing without memory locking (performance may be affected)\n");
+        } else {
+            fprintf(stderr, "Memory locked to prevent page faults\n");
+        }
     }
 
     // 메인 루프: 시그널 대기
