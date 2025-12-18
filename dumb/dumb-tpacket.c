@@ -163,6 +163,15 @@ static int setup_rx_ring(struct interface *iface) {
     fprintf(stderr, "Interface %s: TPACKET_V3 ring setup complete (%zu bytes, %u blocks)\n",
             iface->name, iface->ring_size, iface->req.tp_block_nr);
 
+    // Promiscuous mode: 브리지 목적이면 반드시 필요(호스트로 향하지 않는 프레임도 수신)
+    struct packet_mreq mreq;
+    memset(&mreq, 0, sizeof(mreq));
+    mreq.mr_ifindex = iface->ifindex;
+    mreq.mr_type = PACKET_MR_PROMISC;
+    if (setsockopt(iface->sock_rx, SOL_PACKET, PACKET_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
+        fprintf(stderr, "WARNING: PACKET_MR_PROMISC failed on %s: %s\n", iface->name, strerror(errno));
+    }
+
     return 0;
 }
 
@@ -232,12 +241,14 @@ static void *interface_thread(void *arg) {
             atomic_fetch_add(&stats.rx_packets[idx], 1);
 
             // TX (sendto)
+            const struct ethhdr *eh = (const struct ethhdr *)pkt_data;
             struct sockaddr_ll dest_addr;
             memset(&dest_addr, 0, sizeof(dest_addr));
             dest_addr.sll_family = AF_PACKET;
             dest_addr.sll_protocol = htons(ETH_P_ALL);
             dest_addr.sll_ifindex = tx_iface->ifindex;
             dest_addr.sll_halen = ETH_ALEN;
+            memcpy(dest_addr.sll_addr, eh->h_dest, ETH_ALEN);
 
             ssize_t sent = sendto(tx_iface->sock_tx, pkt_data, pkt_len, 0,
                                   (struct sockaddr *)&dest_addr, sizeof(dest_addr));
@@ -294,6 +305,12 @@ int main(int argc, char **argv) {
         interfaces[i].sock_tx = create_socket(interfaces[i].name, &interfaces[i].ifindex);
         if (interfaces[i].sock_tx < 0) {
             return 1;
+        }
+
+        // TX 경로에서 qdisc 우회(가능한 경우)로 레이턴시/오버헤드 감소
+        int qdisc_bypass = 1;
+        if (setsockopt(interfaces[i].sock_tx, SOL_PACKET, PACKET_QDISC_BYPASS, &qdisc_bypass, sizeof(qdisc_bypass)) < 0) {
+            fprintf(stderr, "WARNING: PACKET_QDISC_BYPASS failed on %s: %s\n", interfaces[i].name, strerror(errno));
         }
 
         // TPACKET_V3 RX ring 설정
