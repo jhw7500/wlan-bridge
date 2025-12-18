@@ -39,10 +39,13 @@ static struct {
 } stats;
 
 // TPACKET_V3 설정
-#define BLOCK_SIZE (4 * 1024)          // 4KB blocks
+// - 처리량(iperf) 목표면 블록/링을 키우고 retire timeout을 늘릴 수 있음
+// - 레이턴시(ping) 목표면 retire timeout을 줄이는 것이 핵심
+#define BLOCK_SIZE (64 * 1024)         // 64KB blocks
 #define FRAME_SIZE 2048                // 2KB per frame
-#define BLOCK_NR 256                   // 256 blocks = 1MB ring
+#define BLOCK_NR 64                    // 64 blocks = 4MB ring
 #define FRAME_NR ((BLOCK_SIZE * BLOCK_NR) / FRAME_SIZE)
+#define RETIRE_TIMEOUT_MS 2            // low-traffic 레이턴시 개선(기본 64ms -> 2ms)
 
 // Interface 구조체
 struct interface {
@@ -136,7 +139,7 @@ static int setup_rx_ring(struct interface *iface) {
     iface->req.tp_frame_size = FRAME_SIZE;
     iface->req.tp_block_nr = BLOCK_NR;
     iface->req.tp_frame_nr = FRAME_NR;
-    iface->req.tp_retire_blk_tov = 64;  // 64ms timeout
+    iface->req.tp_retire_blk_tov = RETIRE_TIMEOUT_MS;
     iface->req.tp_feature_req_word = TP_FT_REQ_FILL_RXHASH;
 
     // TPACKET_V3 활성화
@@ -167,8 +170,8 @@ static int setup_rx_ring(struct interface *iface) {
         fprintf(stderr, "WARNING: PACKET_IGNORE_OUTGOING failed on %s: %s\n", iface->name, strerror(errno));
     }
 
-    fprintf(stderr, "Interface %s: TPACKET_V3 ring setup complete (%zu bytes, %u blocks)\n",
-            iface->name, iface->ring_size, iface->req.tp_block_nr);
+    fprintf(stderr, "Interface %s: TPACKET_V3 ring setup complete (%zu bytes, %u blocks, retire=%dms)\n",
+            iface->name, iface->ring_size, iface->req.tp_block_nr, RETIRE_TIMEOUT_MS);
 
     // Promiscuous mode: 브리지 목적이면 반드시 필요(호스트로 향하지 않는 프레임도 수신)
     struct packet_mreq mreq;
@@ -216,8 +219,8 @@ static void *interface_thread(void *arg) {
     pfd.revents = 0;
 
     while (keep_running) {
-        // Block이 준비될 때까지 poll (timeout 100ms)
-        int ret = poll(&pfd, 1, 100);
+        // Block이 준비될 때까지 poll (timeout은 retire timeout보다 조금 크게)
+        int ret = poll(&pfd, 1, 10);
         if (ret < 0) {
             if (errno == EINTR) continue;
             fprintf(stderr, "ERROR: poll() failed: %s\n", strerror(errno));
