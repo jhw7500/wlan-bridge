@@ -242,6 +242,12 @@ static inline struct tpacket2_hdr *tx_frame_ptr(const struct interface *iface, u
     return (struct tpacket2_hdr *)((uint8_t *)iface->ring_tx + (frame_idx * iface->tx_req.tp_frame_size));
 }
 
+static inline int tx_frame_is_available(const struct tpacket2_hdr *hdr)
+{
+    // kernel doc / selftests: availability is "not (SEND_REQUEST|SENDING)"
+    return !(hdr->tp_status & (TP_STATUS_SEND_REQUEST | TP_STATUS_SENDING));
+}
+
 static int tx_ring_enqueue(unsigned int tx_idx, struct interface *tx_iface, const uint8_t *pkt, uint32_t pkt_len)
 {
     if (!tx_iface->ring_tx) {
@@ -251,14 +257,13 @@ static int tx_ring_enqueue(unsigned int tx_idx, struct interface *tx_iface, cons
     struct tpacket2_hdr *hdr = tx_frame_ptr(tx_iface, tx_iface->tx_frame_idx);
 
     // 사용 가능한 프레임이 아니면 드롭(또는 바쁜 대기할 수 있지만, 레이턴시 우선으로 드롭)
-    // NOTE: TP_STATUS_AVAILABLE 값은 0이므로 bit-test가 아니라 값 비교를 해야 함.
-    if (hdr->tp_status != TP_STATUS_AVAILABLE) {
+    if (!tx_frame_is_available(hdr)) {
         atomic_fetch_add(&stats.ring_full[tx_idx], 1);
         return -2;
     }
 
-    // SOCK_RAW + TX_RING: 사용자 공간에서 L2 프레임(ethernet header 포함)을 그대로 넣어 전송
-    const uint32_t data_off = (uint32_t)TPACKET2_HDRLEN;
+    // kernel doc/selftests: payload starts at TPACKET2_HDRLEN - sizeof(sockaddr_ll)
+    const uint32_t data_off = (uint32_t)(TPACKET2_HDRLEN - sizeof(struct sockaddr_ll));
     const uint32_t max_data_len = (uint32_t)tx_iface->tx_req.tp_frame_size - data_off;
     uint8_t *data = (uint8_t *)hdr + data_off;
     if (pkt_len > max_data_len) {
@@ -268,8 +273,6 @@ static int tx_ring_enqueue(unsigned int tx_idx, struct interface *tx_iface, cons
     memcpy(data, pkt, pkt_len);
     hdr->tp_len = pkt_len;
     hdr->tp_snaplen = pkt_len;
-    hdr->tp_mac = data_off;
-    hdr->tp_net = data_off;
     hdr->tp_status = TP_STATUS_SEND_REQUEST;
 
     // 다음 프레임으로
@@ -283,8 +286,8 @@ static int tx_ring_flush(struct interface *tx_iface)
     if (!tx_iface->ring_tx) {
         return 0;
     }
-    // 커널에 전송 요청 flush (0바이트 send)
-    if (send(tx_iface->sock_tx, NULL, 0, 0) < 0) {
+    // 커널에 전송 요청 flush (0바이트 sendto)
+    if (sendto(tx_iface->sock_tx, NULL, 0, 0, NULL, 0) < 0) {
         return -1;
     }
     return 0;
