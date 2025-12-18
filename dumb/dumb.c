@@ -83,10 +83,6 @@ static pcap_t *open_pcap_handle(const char *ifname, int is_rx, char errbuf[PCAP_
         if (pcap_set_immediate_mode(h, 1) != 0) {
             fprintf(stderr, "WARN: immediate mode set failed on %s: %s\n", ifname, pcap_geterr(h));
         }
-        // 일부 플랫폼에서는 activate 전에만 적용됨
-        if (pcap_setdirection(h, PCAP_D_IN) != 0) {
-            fprintf(stderr, "pcap_setdirection ignored on %s: %s\n", ifname, pcap_geterr(h));
-        }
     }
 
     int act_rc = pcap_activate(h);
@@ -183,6 +179,13 @@ static void ph(unsigned char *ifp, const struct pcap_pkthdr *hdr, const unsigned
 static void *thr(void *ifp)
 {
     unsigned int i = (unsigned int)((uintptr_t)ifp);
+
+    // 입력 전용으로 설정: 일부 환경에서는 activate 이후에만 제대로 적용됨.
+    // 이 설정이 무시되면(=outgoing까지 캡처되면) 브릿지가 자기 자신을 다시 캡처해
+    // 재주입하는 루프가 생겨 ping DUP/큰 지연이 발생할 수 있음.
+    if (pcap_setdirection(ifs.rx[i], PCAP_D_IN) != 0) {
+        fprintf(stderr, "WARNING: pcap_setdirection(%u) ignored: %s\n", i, pcap_geterr(ifs.rx[i]));
+    }
 
     // CPU affinity 설정: 인터페이스별로 전용 코어 할당
     cpu_set_t cpuset;
