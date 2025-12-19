@@ -14,9 +14,13 @@
 #include <sys/mman.h>
 #include <syslog.h>
 #include <time.h>
+#include <limits.h>
 
-// Graceful shutdown flag
-static volatile sig_atomic_t keep_running = 1;
+// Graceful shutdown flag (atomic for proper memory ordering)
+static atomic_int keep_running = ATOMIC_VAR_INIT(1);
+
+// Statistics display request flag (async-signal-safe)
+static volatile sig_atomic_t print_stats_requested = 0;
 
 // Packet statistics (atomic for thread-safety)
 static struct {
@@ -78,6 +82,24 @@ static int clamp_int(int v, int min_v, int max_v)
     if (v < min_v) return min_v;
     if (v > max_v) return max_v;
     return v;
+}
+
+// Safe integer parsing (replacement for atoi)
+static int safe_atoi(const char *str, int default_value)
+{
+    if (!str || !*str) {
+        return default_value;
+    }
+    char *end = NULL;
+    errno = 0;
+    long v = strtol(str, &end, 10);
+    if (errno != 0 || end == str || *end != '\0') {
+        return default_value;
+    }
+    if (v < INT_MIN || v > INT_MAX) {
+        return default_value;
+    }
+    return (int)v;
 }
 
 static int get_dispatch_budget(void)
@@ -173,11 +195,17 @@ static inline int both_ready(void) {
 
 static void sighandler(int sig) {
     (void)sig;
-    keep_running = 0;
+    atomic_store(&keep_running, 0);
 }
 
-static void print_stats(int sig) {
+// Async-signal-safe: 시그널 핸들러에서는 플래그만 설정
+static void sigusr1_handler(int sig) {
     (void)sig;
+    print_stats_requested = 1;
+}
+
+// 실제 통계 출력 함수 (안전한 컨텍스트에서 호출)
+static void print_stats_impl(void) {
     time_t now = time(NULL);
     time_t uptime = now - stats.start_time;
 
@@ -239,8 +267,18 @@ static void ph(unsigned char *ifp, const struct pcap_pkthdr *hdr, const unsigned
             fprintf(stderr, "pcap_inject(%u->%u) failed: %s (total errors: %lu)\n",
                     i, peer, err ? err : "unknown", err_cnt + 1);
         }
+    } else if ((unsigned int)ret < hdr->caplen) {
+        // 부분 전송 감지 - 이는 심각한 문제
+        atomic_fetch_add(&stats.dropped[i], 1);
+
+        static atomic_ulong partial_count = 0;
+        unsigned long p_cnt = atomic_fetch_add(&partial_count, 1);
+        if (p_cnt % 100 == 0) { // 부분 전송은 더 자주 로그
+            fprintf(stderr, "WARNING: Partial inject %d/%u bytes on %u->%u (count: %lu)\n",
+                    ret, hdr->caplen, i, peer, p_cnt + 1);
+        }
     } else {
-        // TX 카운터 증가
+        // TX 카운터 증가 (완전 전송 성공)
         atomic_fetch_add(&stats.tx_packets[peer], 1);
     }
 }
@@ -295,12 +333,12 @@ static void *thr(void *ifp)
     // pcap_loop 대신 dispatch를 사용하여 keep_running 체크 가능하게 함
     const int budget = get_dispatch_budget();
     int stats_check_counter = 0;
-    while (keep_running) {
+    while (atomic_load(&keep_running)) {
         int rc = pcap_dispatch(ifs.rx[i], budget, ph, (unsigned char *)ifp);
         if (rc == PCAP_ERROR) {
             const char *err = pcap_geterr(ifs.rx[i]);
             fprintf(stderr, "pcap_dispatch(%u) error: %s\n", i, err ? err : "unknown");
-            keep_running = 0;
+            atomic_store(&keep_running, 0);
             break;
         }
         // rc == 0: timeout, continue
@@ -362,7 +400,7 @@ int main(int argc, char **argv)
     while ((opt = getopt_long(argc, argv, "h", long_opts, NULL)) != -1) {
         switch (opt) {
         case 1:
-            cfg.dispatch_budget = clamp_int(atoi(optarg), 1, 4096);
+            cfg.dispatch_budget = clamp_int(safe_atoi(optarg, 64), 1, 4096);
             break;
         case 2:
             cfg.enable_affinity = 0;
@@ -371,19 +409,19 @@ int main(int argc, char **argv)
             cfg.enable_rt = 0;
             break;
         case 4:
-            cfg.rt_priority = clamp_int(atoi(optarg), 1, 99);
+            cfg.rt_priority = clamp_int(safe_atoi(optarg, 50), 1, 99);
             break;
         case 5:
             cfg.enable_mlock = 0;
             break;
         case 6:
-            cfg.snaplen = clamp_int(atoi(optarg), 64, 65535);
+            cfg.snaplen = clamp_int(safe_atoi(optarg, DUMB_SNAPLEN), 64, 65535);
             break;
         case 7:
-            cfg.pcap_buffer_bytes = clamp_int(atoi(optarg), 256 * 1024, 64 * 1024 * 1024);
+            cfg.pcap_buffer_bytes = clamp_int(safe_atoi(optarg, DUMB_PCAP_BUFFER_SIZE_BYTES), 256 * 1024, 64 * 1024 * 1024);
             break;
         case 8:
-            cfg.timeout_ms = clamp_int(atoi(optarg), 0, 1000);
+            cfg.timeout_ms = clamp_int(safe_atoi(optarg, 1), 0, 1000);
             break;
         case 9:
             cfg.enable_immediate = 0;
@@ -413,7 +451,7 @@ int main(int argc, char **argv)
     // 시그널 핸들러 등록
     signal(SIGINT, sighandler);
     signal(SIGTERM, sighandler);
-    signal(SIGUSR1, print_stats);  // 통계 출력
+    signal(SIGUSR1, sigusr1_handler);  // 통계 출력 요청
 
     // 통계 초기화
     memset(&stats, 0, sizeof(stats));
@@ -449,10 +487,20 @@ int main(int argc, char **argv)
         }
     }
 
-    // 2) 스레드를 그 다음에 시작
+    // 2) 스레드를 그 다음에 시작 (실패 시 롤백 처리)
     for (int i = 0; i < 2; ++i) {
         if (pthread_create(&ifs.threads[i], NULL, thr, (void *)((uintptr_t)i))) {
-            fprintf(stderr, "FATAL: pthread_create(%d) failed\n", i);
+            fprintf(stderr, "FATAL: pthread_create(%d) failed: %s\n", i, strerror(errno));
+
+            // 이미 생성된 스레드들을 안전하게 종료
+            atomic_store(&keep_running, 0);
+            for (int j = 0; j < i; j++) {
+                if (ifs.rx[j]) {
+                    pcap_breakloop(ifs.rx[j]);
+                }
+                pthread_join(ifs.threads[j], NULL);
+            }
+
             cleanup();
             return 1;
         }
@@ -468,13 +516,19 @@ int main(int argc, char **argv)
         }
     }
 
-    // 메인 루프: 시그널 대기
+    // 메인 루프: 시그널 대기 및 통계 출력 처리
     fprintf(stderr, "Bridge running. Press Ctrl+C to stop, send SIGUSR1 for stats.\n");
     fprintf(stderr, "  Usage: kill -USR1 %d\n", getpid());
     syslog(LOG_INFO, "Bridge started (PID %d)", getpid());
 
-    while (keep_running) {
+    while (atomic_load(&keep_running)) {
         sleep(1);
+
+        // 통계 출력 요청 확인 (async-signal-safe)
+        if (print_stats_requested) {
+            print_stats_requested = 0;
+            print_stats_impl();
+        }
     }
 
     // Graceful shutdown
@@ -496,7 +550,7 @@ int main(int argc, char **argv)
     cleanup();
 
     // 최종 통계 출력
-    print_stats(0);
+    print_stats_impl();
 
     fprintf(stderr, "Shutdown complete.\n");
     syslog(LOG_INFO, "Bridge stopped");

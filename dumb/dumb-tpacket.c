@@ -28,31 +28,41 @@
 // Graceful shutdown flag
 static volatile sig_atomic_t keep_running = 1;
 
-// Packet statistics (atomic for thread-safety)
+// Cache line size for alignment (prevents false sharing)
+#define BRIDGE_CACHE_LINE_SIZE 64
+
+// Per-thread statistics (cache-line aligned to prevent false sharing)
+struct thread_stats {
+    atomic_ulong rx_packets;
+    atomic_ulong tx_packets;
+    atomic_ulong dropped;
+    atomic_ulong ring_full;
+    atomic_ulong errors;
+    char padding[BRIDGE_CACHE_LINE_SIZE - (5 * sizeof(atomic_ulong))];
+} __attribute__((aligned(BRIDGE_CACHE_LINE_SIZE)));
+
+// Packet statistics (cache-line aligned)
 static struct {
-    atomic_ulong rx_packets[2];
-    atomic_ulong tx_packets[2];
-    atomic_ulong dropped[2];
-    atomic_ulong ring_full[2];  // Ring buffer full events
-    atomic_ulong errors[2];
+    struct thread_stats per_thread[2];
     time_t start_time;
 } stats;
 
-// TPACKET_V3 설정
+// TPACKET_V3 설정 (성능 최적화)
 // - 처리량(iperf) 목표면 블록/링을 키우고 retire timeout을 늘릴 수 있음
 // - 레이턴시(ping) 목표면 retire timeout을 줄이는 것이 핵심
+// - 8MB로 증가하여 버스트 트래픽 처리 능력 향상
 #define BLOCK_SIZE (64 * 1024)         // 64KB blocks
 #define FRAME_SIZE 2048                // 2KB per frame
-#define BLOCK_NR 64                    // 64 blocks = 4MB ring
+#define BLOCK_NR 128                   // 128 blocks = 8MB ring (최적화: 4MB → 8MB)
 #define FRAME_NR ((BLOCK_SIZE * BLOCK_NR) / FRAME_SIZE)
-#define RETIRE_TIMEOUT_MS 2            // low-traffic 레이턴시 개선(기본 64ms -> 2ms)
+#define RETIRE_TIMEOUT_MS 1            // 최적화: 2ms → 1ms (더 낮은 레이턴시)
 
 // TX_RING 설정(TPACKET_V2 기반)
 // - TPACKET_V3는 RX 쪽에 유리하고, TX_RING은 커널/환경에 따라 V2가 가장 호환성이 좋음
 // - TX_RING 실패 시 sendto()로 자동 fallback
 #define TX_BLOCK_SIZE (64 * 1024)
 #define TX_FRAME_SIZE 2048
-#define TX_BLOCK_NR 64                 // 4MB
+#define TX_BLOCK_NR 128                // 8MB (최적화: 4MB → 8MB)
 #define TX_FRAME_NR ((TX_BLOCK_SIZE * TX_BLOCK_NR) / TX_FRAME_SIZE)
 
 // Interface 구조체
@@ -88,11 +98,11 @@ static void print_stats(int sig) {
 
     fprintf(stderr, "\n=== TPACKET_V3 Statistics (uptime: %ld sec) ===\n", uptime);
     for (int i = 0; i < 2; i++) {
-        unsigned long rx = atomic_load(&stats.rx_packets[i]);
-        unsigned long tx = atomic_load(&stats.tx_packets[i]);
-        unsigned long drop = atomic_load(&stats.dropped[i]);
-        unsigned long ring_full = atomic_load(&stats.ring_full[i]);
-        unsigned long err = atomic_load(&stats.errors[i]);
+        unsigned long rx = atomic_load(&stats.per_thread[i].rx_packets);
+        unsigned long tx = atomic_load(&stats.per_thread[i].tx_packets);
+        unsigned long drop = atomic_load(&stats.per_thread[i].dropped);
+        unsigned long ring_full = atomic_load(&stats.per_thread[i].ring_full);
+        unsigned long err = atomic_load(&stats.per_thread[i].errors);
 
         fprintf(stderr, "  Interface %d (%s):\n", i, interfaces[i].name);
         fprintf(stderr, "    RX:        %10lu packets (%lu pps)\n", rx, uptime > 0 ? rx/uptime : 0);
@@ -104,10 +114,10 @@ static void print_stats(int sig) {
     fprintf(stderr, "==========================================\n");
 
     syslog(LOG_INFO, "Stats: %s rx=%lu tx=%lu drop=%lu | %s rx=%lu tx=%lu drop=%lu",
-           interfaces[0].name, atomic_load(&stats.rx_packets[0]),
-           atomic_load(&stats.tx_packets[0]), atomic_load(&stats.dropped[0]),
-           interfaces[1].name, atomic_load(&stats.rx_packets[1]),
-           atomic_load(&stats.tx_packets[1]), atomic_load(&stats.dropped[1]));
+           interfaces[0].name, atomic_load(&stats.per_thread[0].rx_packets),
+           atomic_load(&stats.per_thread[0].tx_packets), atomic_load(&stats.per_thread[0].dropped),
+           interfaces[1].name, atomic_load(&stats.per_thread[1].rx_packets),
+           atomic_load(&stats.per_thread[1].tx_packets), atomic_load(&stats.per_thread[1].dropped));
 }
 
 // AF_PACKET 소켓 생성 및 인터페이스 바인딩
@@ -258,7 +268,7 @@ static int tx_ring_enqueue(unsigned int tx_idx, struct interface *tx_iface, cons
 
     // 사용 가능한 프레임이 아니면 드롭(또는 바쁜 대기할 수 있지만, 레이턴시 우선으로 드롭)
     if (!tx_frame_is_available(hdr)) {
-        atomic_fetch_add(&stats.ring_full[tx_idx], 1);
+        atomic_fetch_add(&stats.per_thread[tx_idx].ring_full, 1);
         return -2;
     }
 
@@ -332,7 +342,7 @@ static void *interface_thread(void *arg) {
         if (ret < 0) {
             if (errno == EINTR) continue;
             fprintf(stderr, "ERROR: poll() failed: %s\n", strerror(errno));
-            atomic_fetch_add(&stats.errors[idx], 1);
+            atomic_fetch_add(&stats.per_thread[idx].errors, 1);
             break;
         }
         if (ret == 0) continue;  // Timeout
@@ -346,9 +356,15 @@ static void *interface_thread(void *arg) {
             continue;
         }
 
-        // Block 내의 모든 패킷 처리
+        // Block 내의 모든 패킷 처리 (배치 최적화: atomic 연산 최소화)
         unsigned int num_pkts = pbd->hdr.bh1.num_pkts;
         struct tpacket3_hdr *ppd = (struct tpacket3_hdr *)((uint8_t *)pbd + pbd->hdr.bh1.offset_to_first_pkt);
+
+        // 로컬 카운터 (배치 업데이트용)
+        uint64_t local_rx_count = 0;
+        uint64_t local_tx_count = 0;
+        uint64_t local_drop_count = 0;
+        uint64_t local_error_count = 0;
 
         int tx_flush_needed = 0;
         for (unsigned int i = 0; i < num_pkts; i++) {
@@ -356,14 +372,14 @@ static void *interface_thread(void *arg) {
             uint8_t *pkt_data = (uint8_t *)ppd + ppd->tp_mac;
             uint32_t pkt_len = ppd->tp_snaplen;
 
-            // RX 카운터
-            atomic_fetch_add(&stats.rx_packets[idx], 1);
+            // RX 카운터 (로컬)
+            local_rx_count++;
 
             // TX (sendto)
             const struct ethhdr *eh = (const struct ethhdr *)pkt_data;
             int tx_rc = tx_ring_enqueue(idx ^ 1, tx_iface, pkt_data, pkt_len);
             if (tx_rc == 0) {
-                atomic_fetch_add(&stats.tx_packets[idx ^ 1], 1);
+                local_tx_count++;
                 tx_flush_needed = 1;
             } else if (tx_rc == -1) {
                 // TX_RING 미사용: sendto() fallback
@@ -378,8 +394,8 @@ static void *interface_thread(void *arg) {
                 ssize_t sent = sendto(tx_iface->sock_tx, pkt_data, pkt_len, 0,
                                       (struct sockaddr *)&dest_addr, sizeof(dest_addr));
                 if (sent < 0) {
-                    atomic_fetch_add(&stats.dropped[idx], 1);
-                    atomic_fetch_add(&stats.errors[idx ^ 1], 1);
+                    local_drop_count++;
+                    local_error_count++;
 
                     static atomic_ulong send_err_count[2];
                     unsigned long err_cnt = atomic_fetch_add(&send_err_count[idx], 1) + 1;
@@ -392,21 +408,27 @@ static void *interface_thread(void *arg) {
                                 strerror(errno));
                     }
                 } else {
-                    atomic_fetch_add(&stats.tx_packets[idx ^ 1], 1);
+                    local_tx_count++;
                 }
             } else {
                 // TX_RING 사용 중이지만 프레임이 없거나 전송 flush 실패 등
-                atomic_fetch_add(&stats.dropped[idx], 1);
-                atomic_fetch_add(&stats.errors[idx ^ 1], 1);
+                local_drop_count++;
+                local_error_count++;
             }
 
             // 다음 패킷으로
             ppd = (struct tpacket3_hdr *)((uint8_t *)ppd + ppd->tp_next_offset);
         }
 
+        // 배치 업데이트: 블록당 한 번만 atomic 연산 (성능 최적화)
+        atomic_fetch_add(&stats.per_thread[idx].rx_packets, local_rx_count);
+        atomic_fetch_add(&stats.per_thread[idx ^ 1].tx_packets, local_tx_count);
+        atomic_fetch_add(&stats.per_thread[idx].dropped, local_drop_count);
+        atomic_fetch_add(&stats.per_thread[idx ^ 1].errors, local_error_count);
+
         if (tx_flush_needed) {
             if (tx_ring_flush(tx_iface) != 0) {
-                atomic_fetch_add(&stats.errors[idx ^ 1], 1);
+                atomic_fetch_add(&stats.per_thread[idx ^ 1].errors, 1);
             }
         }
 
