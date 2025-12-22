@@ -18,6 +18,7 @@
 #include <sys/ioctl.h>
 #include <net/if.h>
 #include <netinet/if_ether.h>
+#include <netinet/ip.h>
 #include <ifaddrs.h>
 #include <arpa/inet.h>
 
