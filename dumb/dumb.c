@@ -53,6 +53,7 @@ struct config {
     int timeout_ms;
     int enable_immediate;
     int enable_promisc;
+    int enable_mac_filter; // skip reinject when dst is self/peer MAC
 };
 
 static struct {
@@ -148,6 +149,7 @@ static void print_usage(FILE *out, const char *prog)
             "  --timeout-ms N          pcap timeout ms (env DUMB_TIMEOUT_MS, default 1)\n"
             "  --no-immediate          Disable immediate mode (env DUMB_IMMEDIATE=0, default enabled)\n"
             "  --no-promisc            Disable promisc (env DUMB_PROMISC=0, default enabled; may break bridging)\n"
+            "  --mac-filter            Enable MAC-based reinject skip (env DUMB_MAC_FILTER=1, default off)\n"
             "  -h, --help              Show help\n",
             prog);
 }
@@ -165,6 +167,7 @@ static void init_config_from_env(void)
     cfg.timeout_ms = env_to_int("DUMB_TIMEOUT_MS", 1);
     cfg.enable_immediate = env_to_int("DUMB_IMMEDIATE", 1) ? 1 : 0;
     cfg.enable_promisc = env_to_int("DUMB_PROMISC", 1) ? 1 : 0;
+    cfg.enable_mac_filter = env_to_int("DUMB_MAC_FILTER", 0) ? 1 : 0; // default off
 
     cfg.dispatch_budget = clamp_int(cfg.dispatch_budget, 1, 4096);
     cfg.rt_priority = clamp_int(cfg.rt_priority, 1, 99);
@@ -271,10 +274,12 @@ static void ph(unsigned char *ifp, const struct pcap_pkthdr *hdr, const unsigned
 
     const struct ethhdr *eth = (const struct ethhdr *)data;
 
-    // 목적지 MAC이 브리지 자신(해당 iface) 또는 peer MAC이면 재주입하지 않음
-    if (memcmp(eth->h_dest, ifs.mac[i], ETH_ALEN) == 0 ||
-        memcmp(eth->h_dest, ifs.mac[peer], ETH_ALEN) == 0) {
-        return;
+    // 목적지 MAC이 브리지 자신/peer인 경우 재주입을 생략 (옵션)
+    if (cfg.enable_mac_filter) {
+        if (memcmp(eth->h_dest, ifs.mac[i], ETH_ALEN) == 0 ||
+            memcmp(eth->h_dest, ifs.mac[peer], ETH_ALEN) == 0) {
+            return;
+        }
     }
 
     // RX 카운터 증가
@@ -432,6 +437,7 @@ int main(int argc, char **argv)
         {"timeout-ms", required_argument, 0, 8},
         {"no-immediate", no_argument, 0, 9},
         {"no-promisc", no_argument, 0, 10},
+        {"mac-filter", no_argument, 0, 11},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0},
     };
@@ -468,6 +474,9 @@ int main(int argc, char **argv)
             break;
         case 10:
             cfg.enable_promisc = 0;
+            break;
+        case 11:
+            cfg.enable_mac_filter = 1;
             break;
         case 'h':
             print_usage(stdout, argv[0]);
