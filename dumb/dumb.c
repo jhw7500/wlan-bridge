@@ -304,6 +304,17 @@ static void ph(unsigned char *ifp, const struct pcap_pkthdr *hdr, const unsigned
         if (hdr->caplen >= sizeof(struct ethhdr) + sizeof(struct iphdr)) {
             const struct iphdr *ip4 = (const struct iphdr *)(data + sizeof(struct ethhdr));
             if (is_local_ipv4(ip4->daddr)) {
+                static atomic_ulong ip_filter_hits = 0;
+                static time_t last_ip_log = 0;
+                unsigned long c = atomic_fetch_add(&ip_filter_hits, 1) + 1;
+                time_t now = time(NULL);
+                if (last_ip_log == 0 || now - last_ip_log >= 1) {
+                    char buf[INET_ADDRSTRLEN];
+                    const char *s = inet_ntop(AF_INET, &ip4->daddr, buf, sizeof(buf));
+                    fprintf(stderr, "ip-filter: skipped dst=%s (hits=%lu)\n",
+                            s ? s : "<invalid>", c);
+                    last_ip_log = now;
+                }
                 return;
             }
         }
