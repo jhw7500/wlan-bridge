@@ -25,6 +25,7 @@ ssh "$REMOTE" "
   git checkout $BRANCH
   git reset --hard FETCH_HEAD
   make -C dumb
+  cp dumb/dumb /usr/local/bin/ -f
 "
 
 echo "done."

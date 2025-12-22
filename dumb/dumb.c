@@ -18,6 +18,8 @@
 #include <sys/ioctl.h>
 #include <net/if.h>
 #include <netinet/if_ether.h>
+#include <ifaddrs.h>
+#include <arpa/inet.h>
 
 // Graceful shutdown flag (atomic for proper memory ordering)
 static atomic_int keep_running = ATOMIC_VAR_INIT(1);
@@ -54,6 +56,7 @@ struct config {
     int enable_immediate;
     int enable_promisc;
     int enable_mac_filter; // skip reinject when dst is self/peer MAC
+    int enable_ip_filter;  // skip reinject when dst IP is local
 };
 
 static struct {
@@ -61,6 +64,7 @@ static struct {
     pcap_t *rx[2];
     pcap_t *tx[2];
     uint8_t mac[2][ETH_ALEN];
+    uint32_t ipv4[2]; // network byte order, 0 if not set
     atomic_int ready; // bit0: if0 ready, bit1: if1 ready
     pthread_mutex_t mutex;
     pthread_cond_t cond;
@@ -150,6 +154,7 @@ static void print_usage(FILE *out, const char *prog)
             "  --no-immediate          Disable immediate mode (env DUMB_IMMEDIATE=0, default enabled)\n"
             "  --no-promisc            Disable promisc (env DUMB_PROMISC=0, default enabled; may break bridging)\n"
             "  --mac-filter            Enable MAC-based reinject skip (env DUMB_MAC_FILTER=1, default off)\n"
+            "  --ip-filter             Enable IP-based reinject skip (env DUMB_IP_FILTER=1, default off)\n"
             "  -h, --help              Show help\n",
             prog);
 }
@@ -168,6 +173,7 @@ static void init_config_from_env(void)
     cfg.enable_immediate = env_to_int("DUMB_IMMEDIATE", 1) ? 1 : 0;
     cfg.enable_promisc = env_to_int("DUMB_PROMISC", 1) ? 1 : 0;
     cfg.enable_mac_filter = env_to_int("DUMB_MAC_FILTER", 0) ? 1 : 0; // default off
+    cfg.enable_ip_filter = env_to_int("DUMB_IP_FILTER", 0) ? 1 : 0;   // default off
 
     cfg.dispatch_budget = clamp_int(cfg.dispatch_budget, 1, 4096);
     cfg.rt_priority = clamp_int(cfg.rt_priority, 1, 99);
@@ -264,6 +270,16 @@ static void print_stats_impl(void) {
            atomic_load(&stats.dropped[1]));
 }
 
+static int is_local_ipv4(uint32_t ip)
+{
+    for (int k = 0; k < 2; ++k) {
+        if (ifs.ipv4[k] != 0 && ifs.ipv4[k] == ip) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static void ph(unsigned char *ifp, const struct pcap_pkthdr *hdr, const unsigned char *data)
 {
     unsigned int i = (unsigned int)((uintptr_t)ifp);
@@ -279,6 +295,16 @@ static void ph(unsigned char *ifp, const struct pcap_pkthdr *hdr, const unsigned
         if (memcmp(eth->h_dest, ifs.mac[i], ETH_ALEN) == 0 ||
             memcmp(eth->h_dest, ifs.mac[peer], ETH_ALEN) == 0) {
             return;
+        }
+    }
+
+    // 목적지 IP가 로컬인 경우 재주입 생략 (옵션, IPv4만 처리)
+    if (cfg.enable_ip_filter && eth->h_proto == htons(ETH_P_IP)) {
+        if (hdr->caplen >= sizeof(struct ethhdr) + sizeof(struct iphdr)) {
+            const struct iphdr *ip4 = (const struct iphdr *)(data + sizeof(struct ethhdr));
+            if (is_local_ipv4(ip4->daddr)) {
+                return;
+            }
         }
     }
 
@@ -438,6 +464,7 @@ int main(int argc, char **argv)
         {"no-immediate", no_argument, 0, 9},
         {"no-promisc", no_argument, 0, 10},
         {"mac-filter", no_argument, 0, 11},
+        {"ip-filter", no_argument, 0, 12},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0},
     };
@@ -477,6 +504,9 @@ int main(int argc, char **argv)
             break;
         case 11:
             cfg.enable_mac_filter = 1;
+            break;
+        case 12:
+            cfg.enable_ip_filter = 1;
             break;
         case 'h':
             print_usage(stdout, argv[0]);
@@ -539,6 +569,27 @@ int main(int argc, char **argv)
             fprintf(stderr, "FATAL: failed to read MAC for %s: %s\n", ifname, strerror(errno));
             cleanup();
             return 1;
+        }
+        ifs.ipv4[i] = 0;
+    }
+
+    // IPv4 주소 수집 (최선의 노력, 없어도 동작)
+    if (cfg.enable_ip_filter) {
+        struct ifaddrs *ifa = NULL;
+        if (getifaddrs(&ifa) == 0) {
+            for (struct ifaddrs *p = ifa; p; p = p->ifa_next) {
+                if (!p->ifa_addr || p->ifa_addr->sa_family != AF_INET) continue;
+                for (int i = 0; i < 2; ++i) {
+                    const char *ifname = (i == 0) ? if0 : if1;
+                    if (strncmp(p->ifa_name, ifname, IFNAMSIZ) == 0) {
+                        struct sockaddr_in *sin = (struct sockaddr_in *)p->ifa_addr;
+                        ifs.ipv4[i] = sin->sin_addr.s_addr; // network order
+                    }
+                }
+            }
+            freeifaddrs(ifa);
+        } else {
+            fprintf(stderr, "WARN: getifaddrs failed: %s (IP filter may be ineffective)\n", strerror(errno));
         }
     }
 
