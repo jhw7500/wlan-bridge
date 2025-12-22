@@ -15,6 +15,7 @@
 #include <sys/mman.h>
 #include <syslog.h>
 #include <time.h>
+#include <netinet/ip.h>
 
 // AF_PACKET headers
 #include <arpa/inet.h>
@@ -24,6 +25,7 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <poll.h>
+#include <ifaddrs.h>
 
 // Graceful shutdown flag
 static volatile sig_atomic_t keep_running = 1;
@@ -46,6 +48,11 @@ static struct {
     struct thread_stats per_thread[2];
     time_t start_time;
 } stats;
+
+static uint8_t iface_mac[2][ETH_ALEN];
+static uint32_t iface_ipv4[2]; // network order, 0 if unset
+static int enable_mac_filter = 0;
+static int enable_ip_filter = 0;
 
 // TPACKET_V3 설정 (성능 최적화)
 // - 처리량(iperf) 목표면 블록/링을 키우고 retire timeout을 늘릴 수 있음
@@ -118,6 +125,28 @@ static void print_stats(int sig) {
            atomic_load(&stats.per_thread[0].tx_packets), atomic_load(&stats.per_thread[0].dropped),
            interfaces[1].name, atomic_load(&stats.per_thread[1].rx_packets),
            atomic_load(&stats.per_thread[1].tx_packets), atomic_load(&stats.per_thread[1].dropped));
+}
+
+static int get_mac(const char *ifname, uint8_t mac[ETH_ALEN]) {
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) return -1;
+    struct ifreq ifr;
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
+    if (ioctl(fd, SIOCGIFHWADDR, &ifr) != 0) {
+        close(fd);
+        return -1;
+    }
+    memcpy(mac, ifr.ifr_hwaddr.sa_data, ETH_ALEN);
+    close(fd);
+    return 0;
+}
+
+static int is_local_ipv4(uint32_t ip) {
+    for (int k = 0; k < 2; ++k) {
+        if (iface_ipv4[k] != 0 && iface_ipv4[k] == ip) return 1;
+    }
+    return 0;
 }
 
 // AF_PACKET 소켓 생성 및 인터페이스 바인딩
@@ -375,6 +404,28 @@ static void *interface_thread(void *arg) {
             // RX 카운터 (로컬)
             local_rx_count++;
 
+            if (pkt_len >= sizeof(struct ethhdr)) {
+                const struct ethhdr *eh = (const struct ethhdr *)pkt_data;
+
+                // MAC 필터: 목적지가 self/peer이면 재주입 생략 (옵션)
+                if (enable_mac_filter) {
+                    if (memcmp(eh->h_dest, iface_mac[idx], ETH_ALEN) == 0 ||
+                        memcmp(eh->h_dest, iface_mac[idx ^ 1], ETH_ALEN) == 0) {
+                        goto next_pkt;
+                    }
+                }
+
+                // IP 필터: 목적지 IPv4가 로컬이면 재주입 생략 (옵션)
+                if (enable_ip_filter && eh->h_proto == htons(ETH_P_IP)) {
+                    if (pkt_len >= sizeof(struct ethhdr) + sizeof(struct iphdr)) {
+                        const struct iphdr *ip4 = (const struct iphdr *)(pkt_data + sizeof(struct ethhdr));
+                        if (is_local_ipv4(ip4->daddr)) {
+                            goto next_pkt;
+                        }
+                    }
+                }
+            }
+
             // TX (sendto)
             const struct ethhdr *eh = (const struct ethhdr *)pkt_data;
             int tx_rc = tx_ring_enqueue(idx ^ 1, tx_iface, pkt_data, pkt_len);
@@ -417,6 +468,7 @@ static void *interface_thread(void *arg) {
             }
 
             // 다음 패킷으로
+        next_pkt:
             ppd = (struct tpacket3_hdr *)((uint8_t *)ppd + ppd->tp_next_offset);
         }
 
@@ -447,6 +499,11 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Example: %s eth0 wlan0\n", argv[0]);
         return 1;
     }
+
+    enable_mac_filter = getenv("DUMB_MAC_FILTER") ? 1 : 0;
+    enable_ip_filter = getenv("DUMB_IP_FILTER") ? 1 : 0;
+    memset(iface_ipv4, 0, sizeof(iface_ipv4));
+    memset(iface_mac, 0, sizeof(iface_mac));
 
     // syslog 초기화
     openlog("dumb-tpacket", LOG_PID | LOG_CONS, LOG_DAEMON);
@@ -490,6 +547,30 @@ int main(int argc, char **argv) {
         // TX_RING 설정(실패하면 sendto fallback)
         if (setup_tx_ring(&interfaces[i]) < 0) {
             fprintf(stderr, "WARNING: %s TX_RING disabled, falling back to sendto()\n", interfaces[i].name);
+        }
+
+        // MAC 저장 (필터 옵션용)
+        if (get_mac(interfaces[i].name, iface_mac[i]) != 0) {
+            fprintf(stderr, "WARN: failed to read MAC for %s\n", interfaces[i].name);
+        }
+    }
+
+    // IPv4 수집 (필요 시)
+    if (enable_ip_filter) {
+        struct ifaddrs *ifa = NULL;
+        if (getifaddrs(&ifa) == 0) {
+            for (struct ifaddrs *p = ifa; p; p = p->ifa_next) {
+                if (!p->ifa_addr || p->ifa_addr->sa_family != AF_INET) continue;
+                for (int i = 0; i < 2; ++i) {
+                    if (strncmp(p->ifa_name, interfaces[i].name, IFNAMSIZ) == 0) {
+                        struct sockaddr_in *sin = (struct sockaddr_in *)p->ifa_addr;
+                        iface_ipv4[i] = sin->sin_addr.s_addr;
+                    }
+                }
+            }
+            freeifaddrs(ifa);
+        } else {
+            fprintf(stderr, "WARN: getifaddrs failed: %s (ip-filter may be ineffective)\n", strerror(errno));
         }
     }
 
