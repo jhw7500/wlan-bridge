@@ -506,7 +506,7 @@ int main(int argc, char **argv) {
     memset(iface_mac, 0, sizeof(iface_mac));
 
     // syslog 초기화
-    openlog("dumb-tpacket", LOG_PID | LOG_CONS, LOG_DAEMON);
+    openlog("dumb-tpacket", LOG_PID | LOG_CONS, LOG_LOCAL0);
 
     // 시그널 핸들러
     signal(SIGINT, sighandler);

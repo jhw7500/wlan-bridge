@@ -547,7 +547,7 @@ int main(int argc, char **argv)
     const char *if1 = argv[optind + 1];
 
     // syslog 초기화
-    openlog("dumb-bridge", LOG_PID | LOG_CONS, LOG_DAEMON);
+    openlog("dumb-bridge", LOG_PID | LOG_CONS, LOG_LOCAL0);
 
     // 시그널 핸들러 등록
     signal(SIGINT, sighandler);
