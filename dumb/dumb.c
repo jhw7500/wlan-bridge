@@ -15,6 +15,9 @@
 #include <syslog.h>
 #include <time.h>
 #include <limits.h>
+#include <sys/ioctl.h>
+#include <net/if.h>
+#include <netinet/if_ether.h>
 
 // Graceful shutdown flag (atomic for proper memory ordering)
 static atomic_int keep_running = ATOMIC_VAR_INIT(1);
@@ -56,6 +59,7 @@ static struct {
     pthread_t threads[2];
     pcap_t *rx[2];
     pcap_t *tx[2];
+    uint8_t mac[2][ETH_ALEN];
     atomic_int ready; // bit0: if0 ready, bit1: if1 ready
     pthread_mutex_t mutex;
     pthread_cond_t cond;
@@ -100,6 +104,27 @@ static int safe_atoi(const char *str, int default_value)
         return default_value;
     }
     return (int)v;
+}
+
+static int get_mac(const char *ifname, uint8_t mac[ETH_ALEN])
+{
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        return -1;
+    }
+
+    struct ifreq ifr;
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
+
+    if (ioctl(fd, SIOCGIFHWADDR, &ifr) != 0) {
+        close(fd);
+        return -1;
+    }
+
+    memcpy(mac, ifr.ifr_hwaddr.sa_data, ETH_ALEN);
+    close(fd);
+    return 0;
 }
 
 static int get_dispatch_budget(void)
@@ -242,6 +267,15 @@ static void ph(unsigned char *ifp, const struct pcap_pkthdr *hdr, const unsigned
     unsigned int peer = i ^ 1;
 
     if (!(hdr && data)) return;
+    if (hdr->caplen < sizeof(struct ethhdr)) return; // 너무 작은 프레임은 무시
+
+    const struct ethhdr *eth = (const struct ethhdr *)data;
+
+    // 목적지 MAC이 브리지 자신(해당 iface) 또는 peer MAC이면 재주입하지 않음
+    if (memcmp(eth->h_dest, ifs.mac[i], ETH_ALEN) == 0 ||
+        memcmp(eth->h_dest, ifs.mac[peer], ETH_ALEN) == 0) {
+        return;
+    }
 
     // RX 카운터 증가
     atomic_fetch_add(&stats.rx_packets[i], 1);
@@ -488,6 +522,12 @@ int main(int argc, char **argv)
         }
         ifs.tx[i] = open_pcap_handle(ifname, 0, errbuf);
         if (!ifs.tx[i]) {
+            cleanup();
+            return 1;
+        }
+
+        if (get_mac(ifname, ifs.mac[i]) != 0) {
+            fprintf(stderr, "FATAL: failed to read MAC for %s: %s\n", ifname, strerror(errno));
             cleanup();
             return 1;
         }
