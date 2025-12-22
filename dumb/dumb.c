@@ -58,6 +58,7 @@ struct config {
     int enable_promisc;
     int enable_mac_filter; // skip reinject when dst is self/peer MAC
     int enable_ip_filter;  // skip reinject when dst IP is local
+    int enable_debug_log;  // emit inject/skip logs
 };
 
 static struct {
@@ -156,6 +157,7 @@ static void print_usage(FILE *out, const char *prog)
             "  --no-promisc            Disable promisc (env DUMB_PROMISC=0, default enabled; may break bridging)\n"
             "  --mac-filter            Enable MAC-based reinject skip (env DUMB_MAC_FILTER=1, default off)\n"
             "  --ip-filter             Enable IP-based reinject skip (env DUMB_IP_FILTER=1, default off)\n"
+            "  --no-debug              Disable verbose inject/skip logs (env DUMB_DEBUG=0, default on)\n"
             "  -h, --help              Show help\n",
             prog);
 }
@@ -175,6 +177,7 @@ static void init_config_from_env(void)
     cfg.enable_promisc = env_to_int("DUMB_PROMISC", 1) ? 1 : 0;
     cfg.enable_mac_filter = env_to_int("DUMB_MAC_FILTER", 0) ? 1 : 0; // default off
     cfg.enable_ip_filter = env_to_int("DUMB_IP_FILTER", 0) ? 1 : 0;   // default off
+    cfg.enable_debug_log = env_to_int("DUMB_DEBUG", 1) ? 1 : 0;        // default on
 
     cfg.dispatch_budget = clamp_int(cfg.dispatch_budget, 1, 4096);
     cfg.rt_priority = clamp_int(cfg.rt_priority, 1, 99);
@@ -295,6 +298,11 @@ static void ph(unsigned char *ifp, const struct pcap_pkthdr *hdr, const unsigned
     if (cfg.enable_mac_filter) {
         if (memcmp(eth->h_dest, ifs.mac[i], ETH_ALEN) == 0 ||
             memcmp(eth->h_dest, ifs.mac[peer], ETH_ALEN) == 0) {
+            if (cfg.enable_debug_log) {
+                syslog(LOG_DEBUG, "mac-filter: skipped dst=%02x:%02x:%02x:%02x:%02x:%02x",
+                       eth->h_dest[0], eth->h_dest[1], eth->h_dest[2],
+                       eth->h_dest[3], eth->h_dest[4], eth->h_dest[5]);
+            }
             return;
         }
     }
@@ -304,16 +312,10 @@ static void ph(unsigned char *ifp, const struct pcap_pkthdr *hdr, const unsigned
         if (hdr->caplen >= sizeof(struct ethhdr) + sizeof(struct iphdr)) {
             const struct iphdr *ip4 = (const struct iphdr *)(data + sizeof(struct ethhdr));
             if (is_local_ipv4(ip4->daddr)) {
-                static atomic_ulong ip_filter_hits = 0;
-                static time_t last_ip_log = 0;
-                unsigned long c = atomic_fetch_add(&ip_filter_hits, 1) + 1;
-                time_t now = time(NULL);
-                if (last_ip_log == 0 || now - last_ip_log >= 1) {
+                if (cfg.enable_debug_log) {
                     char buf[INET_ADDRSTRLEN];
                     const char *s = inet_ntop(AF_INET, &ip4->daddr, buf, sizeof(buf));
-                    fprintf(stderr, "ip-filter: skipped dst=%s (hits=%lu)\n",
-                            s ? s : "<invalid>", c);
-                    last_ip_log = now;
+                    syslog(LOG_DEBUG, "ip-filter: skipped dst=%s", s ? s : "<invalid>");
                 }
                 return;
             }
@@ -336,29 +338,33 @@ static void ph(unsigned char *ifp, const struct pcap_pkthdr *hdr, const unsigned
         atomic_fetch_add(&stats.dropped[i], 1);
         atomic_fetch_add(&stats.errors[peer], 1);
 
-        // 첫 실패는 즉시, 이후에는 최소 1초 간격으로 요약 로그
-        static atomic_ulong error_count = 0;
-        static time_t last_log_sec = 0;
-        unsigned long err_cnt = atomic_fetch_add(&error_count, 1) + 1;
-        time_t now = time(NULL);
-        if (last_log_sec == 0 || now - last_log_sec >= 1) {
-            const char *err = pcap_geterr(ifs.tx[peer]);
-            fprintf(stderr, "pcap_inject(%u->%u) failed: %s (errors: %lu)\n",
-                    i, peer, err ? err : "unknown", err_cnt);
-            last_log_sec = now;
+        if (cfg.enable_debug_log) {
+            // 첫 실패는 즉시, 이후에는 최소 1초 간격으로 요약 로그
+            static atomic_ulong error_count = 0;
+            static time_t last_log_sec = 0;
+            unsigned long err_cnt = atomic_fetch_add(&error_count, 1) + 1;
+            time_t now = time(NULL);
+            if (last_log_sec == 0 || now - last_log_sec >= 1) {
+                const char *err = pcap_geterr(ifs.tx[peer]);
+                syslog(LOG_DEBUG, "pcap_inject(%u->%u) failed: %s (errors: %lu)",
+                       i, peer, err ? err : "unknown", err_cnt);
+                last_log_sec = now;
+            }
         }
     } else if ((unsigned int)ret < hdr->caplen) {
         // 부분 전송 감지 - 이는 심각한 문제
         atomic_fetch_add(&stats.dropped[i], 1);
 
-        static atomic_ulong partial_count = 0;
-        static time_t last_partial_log = 0;
-        unsigned long p_cnt = atomic_fetch_add(&partial_count, 1) + 1;
-        time_t now = time(NULL);
-        if (last_partial_log == 0 || now - last_partial_log >= 1) {
-            fprintf(stderr, "WARNING: Partial inject %d/%u bytes on %u->%u (count: %lu)\n",
-                    ret, hdr->caplen, i, peer, p_cnt);
-            last_partial_log = now;
+        if (cfg.enable_debug_log) {
+            static atomic_ulong partial_count = 0;
+            static time_t last_partial_log = 0;
+            unsigned long p_cnt = atomic_fetch_add(&partial_count, 1) + 1;
+            time_t now = time(NULL);
+            if (last_partial_log == 0 || now - last_partial_log >= 1) {
+                syslog(LOG_ERR, "Partial inject %d/%u bytes on %u->%u (count: %lu)",
+                       ret, hdr->caplen, i, peer, p_cnt);
+                last_partial_log = now;
+            }
         }
     } else {
         // TX 카운터 증가 (완전 전송 성공)
@@ -477,6 +483,7 @@ int main(int argc, char **argv)
         {"no-promisc", no_argument, 0, 10},
         {"mac-filter", no_argument, 0, 11},
         {"ip-filter", no_argument, 0, 12},
+        {"no-debug", no_argument, 0, 13},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0},
     };
@@ -519,6 +526,9 @@ int main(int argc, char **argv)
             break;
         case 12:
             cfg.enable_ip_filter = 1;
+            break;
+        case 13:
+            cfg.enable_debug_log = 0;
             break;
         case 'h':
             print_usage(stdout, argv[0]);
