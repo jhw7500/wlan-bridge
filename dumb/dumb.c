@@ -336,6 +336,17 @@ static void ph(unsigned char *ifp, const struct pcap_pkthdr *hdr, const unsigned
 
     // snaplen에 의해 잘린(caplen < len) 패킷은 캡처된 길이만큼만 전달
     int ret = pcap_inject(ifs.tx[peer], data, hdr->caplen);
+    if (ret < 0 && errno == ENOBUFS) {
+        // 간단한 백오프 재시도: ENOBUFS일 때만 3회까지 시도
+        for (int k = 0; k < 3; k++) {
+            struct timespec ts = {.tv_sec = 0, .tv_nsec = 200 * 1000}; // 200µs
+            nanosleep(&ts, NULL);
+            ret = pcap_inject(ifs.tx[peer], data, hdr->caplen);
+            if (ret >= 0 || errno != ENOBUFS) {
+                break;
+            }
+        }
+    }
     if (ret < 0) {
         // 에러 카운터 증가
         atomic_fetch_add(&stats.dropped[i], 1);
