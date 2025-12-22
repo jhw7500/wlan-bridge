@@ -259,23 +259,29 @@ static void ph(unsigned char *ifp, const struct pcap_pkthdr *hdr, const unsigned
         atomic_fetch_add(&stats.dropped[i], 1);
         atomic_fetch_add(&stats.errors[peer], 1);
 
-        // 에러는 로그만 남기고 계속 (rate-limited)
+        // 첫 실패는 즉시, 이후에는 최소 1초 간격으로 요약 로그
         static atomic_ulong error_count = 0;
-        unsigned long err_cnt = atomic_fetch_add(&error_count, 1);
-        if (err_cnt % 1000 == 0) { // 1000개마다 한 번만 로그
+        static time_t last_log_sec = 0;
+        unsigned long err_cnt = atomic_fetch_add(&error_count, 1) + 1;
+        time_t now = time(NULL);
+        if (last_log_sec == 0 || now - last_log_sec >= 1) {
             const char *err = pcap_geterr(ifs.tx[peer]);
-            fprintf(stderr, "pcap_inject(%u->%u) failed: %s (total errors: %lu)\n",
-                    i, peer, err ? err : "unknown", err_cnt + 1);
+            fprintf(stderr, "pcap_inject(%u->%u) failed: %s (errors: %lu)\n",
+                    i, peer, err ? err : "unknown", err_cnt);
+            last_log_sec = now;
         }
     } else if ((unsigned int)ret < hdr->caplen) {
         // 부분 전송 감지 - 이는 심각한 문제
         atomic_fetch_add(&stats.dropped[i], 1);
 
         static atomic_ulong partial_count = 0;
-        unsigned long p_cnt = atomic_fetch_add(&partial_count, 1);
-        if (p_cnt % 100 == 0) { // 부분 전송은 더 자주 로그
+        static time_t last_partial_log = 0;
+        unsigned long p_cnt = atomic_fetch_add(&partial_count, 1) + 1;
+        time_t now = time(NULL);
+        if (last_partial_log == 0 || now - last_partial_log >= 1) {
             fprintf(stderr, "WARNING: Partial inject %d/%u bytes on %u->%u (count: %lu)\n",
-                    ret, hdr->caplen, i, peer, p_cnt + 1);
+                    ret, hdr->caplen, i, peer, p_cnt);
+            last_partial_log = now;
         }
     } else {
         // TX 카운터 증가 (완전 전송 성공)
