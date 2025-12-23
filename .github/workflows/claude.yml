@@ -14,7 +14,7 @@ jobs:
         uses: actions/create-github-app-token@v1
         with:
           app-id: ${{ secrets.APP_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          private-key: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 
       # Checkout repository
       - name: Checkout repository
@@ -23,6 +23,6 @@ jobs:
       # Use Claude with your custom app's token
       - uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          anthropic_api_key: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ steps.app-token.outputs.token }}
           show_full_output: true
