@@ -15,7 +15,6 @@ jobs:
         with:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
-          base_branch: 'rate-limit-inject-logging'
 
       # Use Claude with your custom app's token
       - uses: anthropics/claude-code-action@v1
