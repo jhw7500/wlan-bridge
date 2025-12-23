@@ -22,3 +22,20 @@ jobs:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ steps.app-token.outputs.token }}
           # ... other configuration
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential libpcap-dev
+
+      - name: Build dumb
+        run: |
+          gcc -std=c11 -O2 -Wall -Wextra -pthread \
+            dumb/dumb.c \
+            -lpcap \
+            -o dumb-bridge
