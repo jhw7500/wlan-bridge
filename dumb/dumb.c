@@ -274,15 +274,6 @@ static void print_stats_impl(void) {
         fprintf(stderr, "    Errors:    %10lu\n", err);
     }
     fprintf(stderr, "==========================================\n");
-
-    // syslog에도 기록
-    syslog(LOG_INFO, "Stats: if0 rx=%lu tx=%lu drop=%lu | if1 rx=%lu tx=%lu drop=%lu",
-           atomic_load(&stats.rx_packets[0]),
-           atomic_load(&stats.tx_packets[0]),
-           atomic_load(&stats.dropped[0]),
-           atomic_load(&stats.rx_packets[1]),
-           atomic_load(&stats.tx_packets[1]),
-           atomic_load(&stats.dropped[1]));
 }
 
 // 패킷이 브리지 자신으로 향하는지 확인 (IP + MAC 검증)

@@ -119,12 +119,6 @@ static void print_stats(int sig) {
         fprintf(stderr, "    Errors:    %10lu\n", err);
     }
     fprintf(stderr, "==========================================\n");
-
-    syslog(LOG_INFO, "Stats: %s rx=%lu tx=%lu drop=%lu | %s rx=%lu tx=%lu drop=%lu",
-           interfaces[0].name, atomic_load(&stats.per_thread[0].rx_packets),
-           atomic_load(&stats.per_thread[0].tx_packets), atomic_load(&stats.per_thread[0].dropped),
-           interfaces[1].name, atomic_load(&stats.per_thread[1].rx_packets),
-           atomic_load(&stats.per_thread[1].tx_packets), atomic_load(&stats.per_thread[1].dropped));
 }
 
 static int get_mac(const char *ifname, uint8_t mac[ETH_ALEN]) {
