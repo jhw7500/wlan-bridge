@@ -22,6 +22,11 @@
 #include <ifaddrs.h>
 #include <arpa/inet.h>
 
+// Version information
+#define VERSION "1.0.0"
+#define PROGRAM_NAME "dumb-bridge"
+#define BUILD_FEATURES "VLAN(802.1Q), IP-Filter, MAC-Filter, RT-Scheduling"
+
 // 802.1Q VLAN header structure
 struct vlan_hdr {
     uint16_t h_vlan_TCI;              // Tag Control Information (Priority + VLAN ID)
@@ -584,6 +589,15 @@ int main(int argc, char **argv)
     // syslog 초기화
     openlog("dumb-bridge", LOG_PID | LOG_CONS, LOG_LOCAL0);
 
+    // 버전 정보 출력
+    fprintf(stderr, "%s v%s\n", PROGRAM_NAME, VERSION);
+    fprintf(stderr, "Features: %s\n", BUILD_FEATURES);
+    fprintf(stderr, "Interfaces: %s <-> %s\n\n", if0, if1);
+
+    syslog(LOG_INFO, "%s v%s started (interfaces: %s <-> %s)",
+           PROGRAM_NAME, VERSION, if0, if1);
+    syslog(LOG_INFO, "Features: %s", BUILD_FEATURES);
+
     // 시그널 핸들러 등록
     signal(SIGINT, sighandler);
     signal(SIGTERM, sighandler);
@@ -716,7 +730,7 @@ int main(int argc, char **argv)
     print_stats_impl();
 
     fprintf(stderr, "Shutdown complete.\n");
-    syslog(LOG_INFO, "Bridge stopped");
+    syslog(LOG_INFO, "%s v%s stopped", PROGRAM_NAME, VERSION);
     closelog();
     return 0;
 }
