@@ -22,6 +22,12 @@
 #include <ifaddrs.h>
 #include <arpa/inet.h>
 
+// 802.1Q VLAN header structure
+struct vlan_hdr {
+    uint16_t h_vlan_TCI;              // Tag Control Information (Priority + VLAN ID)
+    uint16_t h_vlan_encapsulated_proto; // Encapsulated protocol (actual EtherType)
+} __attribute__((packed));
+
 // Graceful shutdown flag (atomic for proper memory ordering)
 static atomic_int keep_running = ATOMIC_VAR_INIT(1);
 
@@ -274,10 +280,14 @@ static void print_stats_impl(void) {
            atomic_load(&stats.dropped[1]));
 }
 
-static int is_local_ipv4(uint32_t ip)
+// 패킷이 브리지 자신으로 향하는지 확인 (IP + MAC 검증)
+static int is_packet_to_bridge(uint32_t dst_ip, const uint8_t dst_mac[ETH_ALEN])
 {
     for (int k = 0; k < 2; ++k) {
-        if (ifs.ipv4[k] != 0 && ifs.ipv4[k] == ip) {
+        // IP와 MAC 주소가 모두 일치해야 브리지로 향하는 패킷
+        if (ifs.ipv4[k] != 0 &&
+            ifs.ipv4[k] == dst_ip &&
+            memcmp(dst_mac, ifs.mac[k], ETH_ALEN) == 0) {
             return 1;
         }
     }
@@ -294,6 +304,19 @@ static void ph(unsigned char *ifp, const struct pcap_pkthdr *hdr, const unsigned
 
     const struct ethhdr *eth = (const struct ethhdr *)data;
 
+    // VLAN 태그 파싱 (802.1Q)
+    uint16_t ethertype = ntohs(eth->h_proto);
+    const uint8_t *payload = data + sizeof(struct ethhdr);
+    size_t header_len = sizeof(struct ethhdr);
+
+    // 802.1Q VLAN 태그 처리 (EtherType 0x8100)
+    if (ethertype == ETH_P_8021Q && hdr->caplen >= header_len + sizeof(struct vlan_hdr)) {
+        const struct vlan_hdr *vlan = (const struct vlan_hdr *)payload;
+        ethertype = ntohs(vlan->h_vlan_encapsulated_proto);
+        payload += sizeof(struct vlan_hdr);
+        header_len += sizeof(struct vlan_hdr);
+    }
+
     // 목적지 MAC이 브리지 자신/peer인 경우 재주입을 생략 (옵션)
     if (cfg.enable_mac_filter) {
         if (memcmp(eth->h_dest, ifs.mac[i], ETH_ALEN) == 0 ||
@@ -308,17 +331,22 @@ static void ph(unsigned char *ifp, const struct pcap_pkthdr *hdr, const unsigned
     }
 
     // 목적지 IP가 로컬인 경우 재주입 생략 (옵션, IPv4만 처리)
-    if (cfg.enable_ip_filter && eth->h_proto == htons(ETH_P_IP)) {
-        if (hdr->caplen >= sizeof(struct ethhdr) + sizeof(struct iphdr)) {
-            const struct iphdr *ip4 = (const struct iphdr *)(data + sizeof(struct ethhdr));
-            if (is_local_ipv4(ip4->daddr)) {
+    // VLAN 파싱 후 실제 EtherType 사용
+    // IP + MAC 주소 검증으로 정확한 필터링
+    if (cfg.enable_ip_filter && ethertype == ETH_P_IP) {
+        if (hdr->caplen >= header_len + sizeof(struct iphdr)) {
+            const struct iphdr *ip4 = (const struct iphdr *)payload;
+            if (is_packet_to_bridge(ip4->daddr, eth->h_dest)) {
                 if (cfg.enable_debug_log) {
                     static atomic_ulong ip_filter_hits = 0;
                     unsigned long c = atomic_fetch_add(&ip_filter_hits, 1) + 1;
                     char buf[INET_ADDRSTRLEN];
                     const char *s = inet_ntop(AF_INET, &ip4->daddr, buf, sizeof(buf));
-                    syslog(LOG_DEBUG, "ip-filter: skipped dst=%s (hits=%lu)",
-                           s ? s : "<invalid>", c);
+                    syslog(LOG_DEBUG, "ip-filter: skipped dst_ip=%s dst_mac=%02x:%02x:%02x:%02x:%02x:%02x (hits=%lu)",
+                           s ? s : "<invalid>",
+                           eth->h_dest[0], eth->h_dest[1], eth->h_dest[2],
+                           eth->h_dest[3], eth->h_dest[4], eth->h_dest[5],
+                           c);
                 }
                 return;
             }
@@ -337,15 +365,8 @@ static void ph(unsigned char *ifp, const struct pcap_pkthdr *hdr, const unsigned
     // snaplen에 의해 잘린(caplen < len) 패킷은 캡처된 길이만큼만 전달
     int ret = pcap_inject(ifs.tx[peer], data, hdr->caplen);
     if (ret < 0 && errno == ENOBUFS) {
-        // 간단한 백오프 재시도: ENOBUFS일 때만 3회까지 시도
-        for (int k = 0; k < 3; k++) {
-            struct timespec ts = {.tv_sec = 0, .tv_nsec = 200 * 1000}; // 200µs
-            nanosleep(&ts, NULL);
-            ret = pcap_inject(ifs.tx[peer], data, hdr->caplen);
-            if (ret >= 0 || errno != ENOBUFS) {
-                break;
-            }
-        }
+        // sleep 없이 즉시 1회만 재시도 (일시적 버퍼 부족 복구 시도)
+        ret = pcap_inject(ifs.tx[peer], data, hdr->caplen);
     }
     if (ret < 0) {
         // 에러 카운터 증가
