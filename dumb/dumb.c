@@ -15,6 +15,23 @@
 #include <syslog.h>
 #include <time.h>
 #include <limits.h>
+#include <sys/ioctl.h>
+#include <net/if.h>
+#include <netinet/if_ether.h>
+#include <netinet/ip.h>
+#include <ifaddrs.h>
+#include <arpa/inet.h>
+
+// Version information
+#define VERSION "1.0.0"
+#define PROGRAM_NAME "dumb-bridge"
+#define BUILD_FEATURES "VLAN(802.1Q), IP-Filter, MAC-Filter, RT-Scheduling"
+
+// 802.1Q VLAN header structure
+struct vlan_hdr {
+    uint16_t h_vlan_TCI;              // Tag Control Information (Priority + VLAN ID)
+    uint16_t h_vlan_encapsulated_proto; // Encapsulated protocol (actual EtherType)
+} __attribute__((packed));
 
 // Graceful shutdown flag (atomic for proper memory ordering)
 static atomic_int keep_running = ATOMIC_VAR_INIT(1);
@@ -50,12 +67,17 @@ struct config {
     int timeout_ms;
     int enable_immediate;
     int enable_promisc;
+    int enable_mac_filter; // skip reinject when dst is self/peer MAC
+    int enable_ip_filter;  // skip reinject when dst IP is local
+    int enable_debug_log;  // emit inject/skip logs
 };
 
 static struct {
     pthread_t threads[2];
     pcap_t *rx[2];
     pcap_t *tx[2];
+    uint8_t mac[2][ETH_ALEN];
+    uint32_t ipv4[2]; // network byte order, 0 if not set
     atomic_int ready; // bit0: if0 ready, bit1: if1 ready
     pthread_mutex_t mutex;
     pthread_cond_t cond;
@@ -102,6 +124,27 @@ static int safe_atoi(const char *str, int default_value)
     return (int)v;
 }
 
+static int get_mac(const char *ifname, uint8_t mac[ETH_ALEN])
+{
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        return -1;
+    }
+
+    struct ifreq ifr;
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
+
+    if (ioctl(fd, SIOCGIFHWADDR, &ifr) != 0) {
+        close(fd);
+        return -1;
+    }
+
+    memcpy(mac, ifr.ifr_hwaddr.sa_data, ETH_ALEN);
+    close(fd);
+    return 0;
+}
+
 static int get_dispatch_budget(void)
 {
     return clamp_int(cfg.dispatch_budget, 1, 4096);
@@ -123,6 +166,9 @@ static void print_usage(FILE *out, const char *prog)
             "  --timeout-ms N          pcap timeout ms (env DUMB_TIMEOUT_MS, default 1)\n"
             "  --no-immediate          Disable immediate mode (env DUMB_IMMEDIATE=0, default enabled)\n"
             "  --no-promisc            Disable promisc (env DUMB_PROMISC=0, default enabled; may break bridging)\n"
+            "  --mac-filter            Enable MAC-based reinject skip (env DUMB_MAC_FILTER=1, default off)\n"
+            "  --ip-filter             Enable IP-based reinject skip (env DUMB_IP_FILTER=1, default off)\n"
+            "  --no-debug              Disable verbose inject/skip logs (env DUMB_DEBUG=0, default on)\n"
             "  -h, --help              Show help\n",
             prog);
 }
@@ -140,6 +186,9 @@ static void init_config_from_env(void)
     cfg.timeout_ms = env_to_int("DUMB_TIMEOUT_MS", 1);
     cfg.enable_immediate = env_to_int("DUMB_IMMEDIATE", 1) ? 1 : 0;
     cfg.enable_promisc = env_to_int("DUMB_PROMISC", 1) ? 1 : 0;
+    cfg.enable_mac_filter = env_to_int("DUMB_MAC_FILTER", 0) ? 1 : 0; // default off
+    cfg.enable_ip_filter = env_to_int("DUMB_IP_FILTER", 0) ? 1 : 0;   // default off
+    cfg.enable_debug_log = env_to_int("DUMB_DEBUG", 1) ? 1 : 0;        // default on
 
     cfg.dispatch_budget = clamp_int(cfg.dispatch_budget, 1, 4096);
     cfg.rt_priority = clamp_int(cfg.rt_priority, 1, 99);
@@ -236,12 +285,78 @@ static void print_stats_impl(void) {
            atomic_load(&stats.dropped[1]));
 }
 
+// 패킷이 브리지 자신으로 향하는지 확인 (IP + MAC 검증)
+static int is_packet_to_bridge(uint32_t dst_ip, const uint8_t dst_mac[ETH_ALEN])
+{
+    for (int k = 0; k < 2; ++k) {
+        // IP와 MAC 주소가 모두 일치해야 브리지로 향하는 패킷
+        if (ifs.ipv4[k] != 0 &&
+            ifs.ipv4[k] == dst_ip &&
+            memcmp(dst_mac, ifs.mac[k], ETH_ALEN) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static void ph(unsigned char *ifp, const struct pcap_pkthdr *hdr, const unsigned char *data)
 {
     unsigned int i = (unsigned int)((uintptr_t)ifp);
     unsigned int peer = i ^ 1;
 
     if (!(hdr && data)) return;
+    if (hdr->caplen < sizeof(struct ethhdr)) return; // 너무 작은 프레임은 무시
+
+    const struct ethhdr *eth = (const struct ethhdr *)data;
+
+    // VLAN 태그 파싱 (802.1Q)
+    uint16_t ethertype = ntohs(eth->h_proto);
+    const uint8_t *payload = data + sizeof(struct ethhdr);
+    size_t header_len = sizeof(struct ethhdr);
+
+    // 802.1Q VLAN 태그 처리 (EtherType 0x8100)
+    if (ethertype == ETH_P_8021Q && hdr->caplen >= header_len + sizeof(struct vlan_hdr)) {
+        const struct vlan_hdr *vlan = (const struct vlan_hdr *)payload;
+        ethertype = ntohs(vlan->h_vlan_encapsulated_proto);
+        payload += sizeof(struct vlan_hdr);
+        header_len += sizeof(struct vlan_hdr);
+    }
+
+    // 목적지 MAC이 브리지 자신/peer인 경우 재주입을 생략 (옵션)
+    if (cfg.enable_mac_filter) {
+        if (memcmp(eth->h_dest, ifs.mac[i], ETH_ALEN) == 0 ||
+            memcmp(eth->h_dest, ifs.mac[peer], ETH_ALEN) == 0) {
+            if (cfg.enable_debug_log) {
+                syslog(LOG_DEBUG, "mac-filter: skipped dst=%02x:%02x:%02x:%02x:%02x:%02x",
+                       eth->h_dest[0], eth->h_dest[1], eth->h_dest[2],
+                       eth->h_dest[3], eth->h_dest[4], eth->h_dest[5]);
+            }
+            return;
+        }
+    }
+
+    // 목적지 IP가 로컬인 경우 재주입 생략 (옵션, IPv4만 처리)
+    // VLAN 파싱 후 실제 EtherType 사용
+    // IP + MAC 주소 검증으로 정확한 필터링
+    if (cfg.enable_ip_filter && ethertype == ETH_P_IP) {
+        if (hdr->caplen >= header_len + sizeof(struct iphdr)) {
+            const struct iphdr *ip4 = (const struct iphdr *)payload;
+            if (is_packet_to_bridge(ip4->daddr, eth->h_dest)) {
+                if (cfg.enable_debug_log) {
+                    static atomic_ulong ip_filter_hits = 0;
+                    unsigned long c = atomic_fetch_add(&ip_filter_hits, 1) + 1;
+                    char buf[INET_ADDRSTRLEN];
+                    const char *s = inet_ntop(AF_INET, &ip4->daddr, buf, sizeof(buf));
+                    syslog(LOG_DEBUG, "ip-filter: skipped dst_ip=%s dst_mac=%02x:%02x:%02x:%02x:%02x:%02x (hits=%lu)",
+                           s ? s : "<invalid>",
+                           eth->h_dest[0], eth->h_dest[1], eth->h_dest[2],
+                           eth->h_dest[3], eth->h_dest[4], eth->h_dest[5],
+                           c);
+                }
+                return;
+            }
+        }
+    }
 
     // RX 카운터 증가
     atomic_fetch_add(&stats.rx_packets[i], 1);
@@ -254,34 +369,42 @@ static void ph(unsigned char *ifp, const struct pcap_pkthdr *hdr, const unsigned
 
     // snaplen에 의해 잘린(caplen < len) 패킷은 캡처된 길이만큼만 전달
     int ret = pcap_inject(ifs.tx[peer], data, hdr->caplen);
+    if (ret < 0 && errno == ENOBUFS) {
+        // sleep 없이 즉시 1회만 재시도 (일시적 버퍼 부족 복구 시도)
+        ret = pcap_inject(ifs.tx[peer], data, hdr->caplen);
+    }
     if (ret < 0) {
         // 에러 카운터 증가
         atomic_fetch_add(&stats.dropped[i], 1);
         atomic_fetch_add(&stats.errors[peer], 1);
 
-        // 첫 실패는 즉시, 이후에는 최소 1초 간격으로 요약 로그
-        static atomic_ulong error_count = 0;
-        static time_t last_log_sec = 0;
-        unsigned long err_cnt = atomic_fetch_add(&error_count, 1) + 1;
-        time_t now = time(NULL);
-        if (last_log_sec == 0 || now - last_log_sec >= 1) {
-            const char *err = pcap_geterr(ifs.tx[peer]);
-            fprintf(stderr, "pcap_inject(%u->%u) failed: %s (errors: %lu)\n",
-                    i, peer, err ? err : "unknown", err_cnt);
-            last_log_sec = now;
+        if (cfg.enable_debug_log) {
+            // 첫 실패는 즉시, 이후에는 최소 1초 간격으로 요약 로그
+            static atomic_ulong error_count = 0;
+            static time_t last_log_sec = 0;
+            unsigned long err_cnt = atomic_fetch_add(&error_count, 1) + 1;
+            time_t now = time(NULL);
+            if (last_log_sec == 0 || now - last_log_sec >= 1) {
+                const char *err = pcap_geterr(ifs.tx[peer]);
+                syslog(LOG_DEBUG, "pcap_inject(%u->%u) failed: %s (errors: %lu)",
+                       i, peer, err ? err : "unknown", err_cnt);
+                last_log_sec = now;
+            }
         }
     } else if ((unsigned int)ret < hdr->caplen) {
         // 부분 전송 감지 - 이는 심각한 문제
         atomic_fetch_add(&stats.dropped[i], 1);
 
-        static atomic_ulong partial_count = 0;
-        static time_t last_partial_log = 0;
-        unsigned long p_cnt = atomic_fetch_add(&partial_count, 1) + 1;
-        time_t now = time(NULL);
-        if (last_partial_log == 0 || now - last_partial_log >= 1) {
-            fprintf(stderr, "WARNING: Partial inject %d/%u bytes on %u->%u (count: %lu)\n",
-                    ret, hdr->caplen, i, peer, p_cnt);
-            last_partial_log = now;
+        if (cfg.enable_debug_log) {
+            static atomic_ulong partial_count = 0;
+            static time_t last_partial_log = 0;
+            unsigned long p_cnt = atomic_fetch_add(&partial_count, 1) + 1;
+            time_t now = time(NULL);
+            if (last_partial_log == 0 || now - last_partial_log >= 1) {
+                syslog(LOG_ERR, "Partial inject %d/%u bytes on %u->%u (count: %lu)",
+                       ret, hdr->caplen, i, peer, p_cnt);
+                last_partial_log = now;
+            }
         }
     } else {
         // TX 카운터 증가 (완전 전송 성공)
@@ -398,6 +521,9 @@ int main(int argc, char **argv)
         {"timeout-ms", required_argument, 0, 8},
         {"no-immediate", no_argument, 0, 9},
         {"no-promisc", no_argument, 0, 10},
+        {"mac-filter", no_argument, 0, 11},
+        {"ip-filter", no_argument, 0, 12},
+        {"no-debug", no_argument, 0, 13},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0},
     };
@@ -435,6 +561,15 @@ int main(int argc, char **argv)
         case 10:
             cfg.enable_promisc = 0;
             break;
+        case 11:
+            cfg.enable_mac_filter = 1;
+            break;
+        case 12:
+            cfg.enable_ip_filter = 1;
+            break;
+        case 13:
+            cfg.enable_debug_log = 0;
+            break;
         case 'h':
             print_usage(stdout, argv[0]);
             return 0;
@@ -452,7 +587,16 @@ int main(int argc, char **argv)
     const char *if1 = argv[optind + 1];
 
     // syslog 초기화
-    openlog("dumb-bridge", LOG_PID | LOG_CONS, LOG_DAEMON);
+    openlog("dumb-bridge", LOG_PID | LOG_CONS, LOG_LOCAL0);
+
+    // 버전 정보 출력
+    fprintf(stderr, "%s v%s\n", PROGRAM_NAME, VERSION);
+    fprintf(stderr, "Features: %s\n", BUILD_FEATURES);
+    fprintf(stderr, "Interfaces: %s <-> %s\n\n", if0, if1);
+
+    syslog(LOG_INFO, "%s v%s started (interfaces: %s <-> %s)",
+           PROGRAM_NAME, VERSION, if0, if1);
+    syslog(LOG_INFO, "Features: %s", BUILD_FEATURES);
 
     // 시그널 핸들러 등록
     signal(SIGINT, sighandler);
@@ -490,6 +634,33 @@ int main(int argc, char **argv)
         if (!ifs.tx[i]) {
             cleanup();
             return 1;
+        }
+
+        if (get_mac(ifname, ifs.mac[i]) != 0) {
+            fprintf(stderr, "FATAL: failed to read MAC for %s: %s\n", ifname, strerror(errno));
+            cleanup();
+            return 1;
+        }
+        ifs.ipv4[i] = 0;
+    }
+
+    // IPv4 주소 수집 (최선의 노력, 없어도 동작)
+    if (cfg.enable_ip_filter) {
+        struct ifaddrs *ifa = NULL;
+        if (getifaddrs(&ifa) == 0) {
+            for (struct ifaddrs *p = ifa; p; p = p->ifa_next) {
+                if (!p->ifa_addr || p->ifa_addr->sa_family != AF_INET) continue;
+                for (int i = 0; i < 2; ++i) {
+                    const char *ifname = (i == 0) ? if0 : if1;
+                    if (strncmp(p->ifa_name, ifname, IFNAMSIZ) == 0) {
+                        struct sockaddr_in *sin = (struct sockaddr_in *)p->ifa_addr;
+                        ifs.ipv4[i] = sin->sin_addr.s_addr; // network order
+                    }
+                }
+            }
+            freeifaddrs(ifa);
+        } else {
+            fprintf(stderr, "WARN: getifaddrs failed: %s (IP filter may be ineffective)\n", strerror(errno));
         }
     }
 
@@ -559,7 +730,7 @@ int main(int argc, char **argv)
     print_stats_impl();
 
     fprintf(stderr, "Shutdown complete.\n");
-    syslog(LOG_INFO, "Bridge stopped");
+    syslog(LOG_INFO, "%s v%s stopped", PROGRAM_NAME, VERSION);
     closelog();
     return 0;
 }
