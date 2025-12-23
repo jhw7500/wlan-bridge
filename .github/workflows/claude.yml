@@ -15,10 +15,12 @@ jobs:
         with:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          target-branch: 'rate-limit-inject-logging'
 
       # Use Claude with your custom app's token
       - uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ steps.app-token.outputs.token }}
+          target-branch: 'rate-limit-inject-logging'
           # ... other configuration
