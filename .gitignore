@@ -42,3 +42,7 @@ tmp/
 
 # Nested repos / large vendor drops
 projects/wlan-package/
+
+.gemini/
+
+gha-creds-*.json
