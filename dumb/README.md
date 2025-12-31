@@ -98,3 +98,23 @@ sudo kill -USR1 $(pidof dumb-tpacket)
 - ping은 작은 패킷 위주의 RTT(레이턴시) 지표라서 스케줄링/페이지폴트/대기 방식 개선이 바로 효과가 납니다.
 - iperf(TCP/UDP) 처리량은 무선 링크(MCS/재전송/aggregation), 드라이버 큐, 그리고 userspace 브릿지의 패킷당 오버헤드가 병목이 되는 경우가 많아 변화가 작을 수 있습니다.
 - 처리량이 목표라면 `dumb-tpacket.c` 기반으로 튜닝/전환을 검토하세요.
+
+## Claude Code Action 테스트
+
+이 저장소는 GitHub Actions를 통해 Claude Code를 사용한 자동 코드 리뷰 기능을 제공합니다.
+
+### 사용 방법
+
+Issue 또는 Pull Request에서 `@claude`를 멘션하여 다음과 같은 작업을 수행할 수 있습니다:
+
+- 코드 리뷰 요청
+- 버그 분석
+- 성능 최적화 제안
+- 코드 설명 요청
+
+### 예시
+
+```
+@claude 이 PR의 변경사항을 리뷰해주세요
+@claude dumb.c의 패킷 포워딩 로직을 설명해주세요
+```
