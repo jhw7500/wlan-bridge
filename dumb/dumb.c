@@ -21,6 +21,7 @@
 #include <netinet/ip.h>
 #include <ifaddrs.h>
 #include <arpa/inet.h>
+#include <net/if_arp.h>
 
 // Version information
 #define VERSION "1.0.0"
@@ -285,17 +286,59 @@ static void print_stats_impl(void) {
            atomic_load(&stats.dropped[1]));
 }
 
-// 패킷이 브리지 자신으로 향하는지 확인 (IP + MAC 검증)
-static int is_packet_to_bridge(uint32_t dst_ip, const uint8_t dst_mac[ETH_ALEN])
+// 패킷이 브리지 자신으로 향하는지 확인 (IP만 검증, MAC 체크 제거)
+// MAC 스푸핑 환경에서는 MAC 검증이 불필요하며, IP만으로 충분함
+static int is_packet_to_bridge_ip_only(uint32_t dst_ip)
 {
     for (int k = 0; k < 2; ++k) {
-        // IP와 MAC 주소가 모두 일치해야 브리지로 향하는 패킷
-        if (ifs.ipv4[k] != 0 &&
-            ifs.ipv4[k] == dst_ip &&
-            memcmp(dst_mac, ifs.mac[k], ETH_ALEN) == 0) {
+        if (ifs.ipv4[k] != 0 && ifs.ipv4[k] == dst_ip) {
             return 1;
         }
     }
+    return 0;
+}
+
+// ARP 패킷이 브리지 IP를 대상으로 하는지 확인
+static int is_arp_for_bridge(const struct pcap_pkthdr *hdr,
+                              const uint8_t *payload,
+                              size_t header_len)
+{
+    // ARP 헤더 + 주소 필드 최소 크기: 8 + 6 + 4 + 6 + 4 = 28 bytes
+    const size_t min_arp_size = 28;
+    if (hdr->caplen < header_len + min_arp_size) {
+        return 0;
+    }
+
+    const struct arphdr *arp = (const struct arphdr *)payload;
+
+    // IPv4 over Ethernet ARP만 처리
+    if (ntohs(arp->ar_hrd) != ARPHRD_ETHER ||
+        ntohs(arp->ar_pro) != ETH_P_IP ||
+        arp->ar_hln != ETH_ALEN ||
+        arp->ar_pln != 4) {
+        return 0;
+    }
+
+    // ARP 패킷 구조: [arphdr 8] [sender_mac 6] [sender_ip 4] [target_mac 6] [target_ip 4]
+    const uint8_t *arp_data = payload + 8; // arphdr 크기
+
+    // Target IP 추출 (offset: sender_mac(6) + sender_ip(4) + target_mac(6) = 16)
+    uint32_t target_ip;
+    memcpy(&target_ip, arp_data + 16, 4);
+
+    // 브리지 IP와 비교
+    for (int k = 0; k < 2; ++k) {
+        if (ifs.ipv4[k] != 0 && ifs.ipv4[k] == target_ip) {
+            if (cfg.enable_debug_log) {
+                char ip_str[INET_ADDRSTRLEN];
+                struct in_addr addr = {.s_addr = target_ip};
+                inet_ntop(AF_INET, &addr, ip_str, sizeof(ip_str));
+                syslog(LOG_DEBUG, "arp-filter: blocked ARP for bridge IP %s", ip_str);
+            }
+            return 1;
+        }
+    }
+
     return 0;
 }
 
@@ -309,6 +352,11 @@ static void ph(unsigned char *ifp, const struct pcap_pkthdr *hdr, const unsigned
 
     const struct ethhdr *eth = (const struct ethhdr *)data;
 
+    // L2 브리지 원칙: Multicast/Broadcast는 무조건 포워딩
+    // (단, 브리지 자신으로 향하는 것은 예외 처리)
+    // MAC 주소 첫 바이트 LSB가 1이면 Multicast/Broadcast
+    const int is_multicast = eth->h_dest[0] & 0x01;
+
     // VLAN 태그 파싱 (802.1Q)
     uint16_t ethertype = ntohs(eth->h_proto);
     const uint8_t *payload = data + sizeof(struct ethhdr);
@@ -320,6 +368,19 @@ static void ph(unsigned char *ifp, const struct pcap_pkthdr *hdr, const unsigned
         ethertype = ntohs(vlan->h_vlan_encapsulated_proto);
         payload += sizeof(struct vlan_hdr);
         header_len += sizeof(struct vlan_hdr);
+    }
+
+    // Multicast/Broadcast 처리
+    if (is_multicast) {
+        // 브리지 IP로 향하는 ARP만 필터링 (선택적)
+        if (cfg.enable_ip_filter && ethertype == ETH_P_ARP) {
+            if (is_arp_for_bridge(hdr, payload, header_len)) {
+                return; // 브리지로 향하는 ARP는 커널이 처리
+            }
+        }
+
+        // 나머지 Multicast/Broadcast는 무조건 포워딩
+        goto forward_packet;
     }
 
     // 목적지 MAC이 브리지 자신/peer인 경우 재주입을 생략 (옵션)
@@ -335,28 +396,38 @@ static void ph(unsigned char *ifp, const struct pcap_pkthdr *hdr, const unsigned
         }
     }
 
-    // 목적지 IP가 로컬인 경우 재주입 생략 (옵션, IPv4만 처리)
-    // VLAN 파싱 후 실제 EtherType 사용
-    // IP + MAC 주소 검증으로 정확한 필터링
+    // 목적지 IP가 로컬인 경우 재주입 생략 (옵션, IPv4 Unicast만 처리)
+    // Multicast는 위에서 이미 처리됨
     if (cfg.enable_ip_filter && ethertype == ETH_P_IP) {
         if (hdr->caplen >= header_len + sizeof(struct iphdr)) {
             const struct iphdr *ip4 = (const struct iphdr *)payload;
-            if (is_packet_to_bridge(ip4->daddr, eth->h_dest)) {
+
+            // IPv4 Multicast 범위 체크 (224.0.0.0/4)
+            // 이미 L2 multicast 체크했지만 안전을 위해 이중 체크
+            uint32_t dst_ip_host = ntohl(ip4->daddr);
+            if (dst_ip_host >= 0xE0000000 && dst_ip_host <= 0xEFFFFFFF) {
+                // IPv4 Multicast는 포워딩
+                goto forward_packet;
+            }
+
+            // Unicast: 브리지 IP 체크 (MAC 체크 제거됨)
+            if (is_packet_to_bridge_ip_only(ip4->daddr)) {
                 if (cfg.enable_debug_log) {
                     static atomic_ulong ip_filter_hits = 0;
                     unsigned long c = atomic_fetch_add(&ip_filter_hits, 1) + 1;
-                    char buf[INET_ADDRSTRLEN];
-                    const char *s = inet_ntop(AF_INET, &ip4->daddr, buf, sizeof(buf));
-                    syslog(LOG_DEBUG, "ip-filter: skipped dst_ip=%s dst_mac=%02x:%02x:%02x:%02x:%02x:%02x (hits=%lu)",
-                           s ? s : "<invalid>",
-                           eth->h_dest[0], eth->h_dest[1], eth->h_dest[2],
-                           eth->h_dest[3], eth->h_dest[4], eth->h_dest[5],
-                           c);
+                    if (c % 1000 == 1) { // 1000번마다 로그 (빈도 제한)
+                        char buf[INET_ADDRSTRLEN];
+                        inet_ntop(AF_INET, &ip4->daddr, buf, sizeof(buf));
+                        syslog(LOG_DEBUG, "ip-filter: skipped unicast to bridge %s (hits=%lu)",
+                               buf, c);
+                    }
                 }
                 return;
             }
         }
     }
+
+forward_packet:
 
     // RX 카운터 증가
     atomic_fetch_add(&stats.rx_packets[i], 1);
