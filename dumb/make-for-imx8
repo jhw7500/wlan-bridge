@@ -22,6 +22,7 @@ fi
     exit 1
 }
 
+# shellcheck disable=SC1090
 . "${SDK_LOC}/environment-setup-${SDK_NAME}"
 #. ./environment-setup-${SDK_NAME}
 
@@ -36,7 +37,7 @@ PKG_CONFIG_LIBDIR="$SYSROOT/usr/lib/pkgconfig:$SYSROOT/usr/share/pkgconfig"
 PKG_CONFIG_SYSROOT_DIR="$PKG_CONFIG_SYSROOT_DIR" \
     PKG_CONFIG_PATH="$PKG_CONFIG_PATH" \
     PKG_CONFIG_LIBDIR="$PKG_CONFIG_LIBDIR" \
-    PKG_CONFIG_DIR= \
+    PKG_CONFIG_DIR='' \
     make \
         CC="$CC" \
         CFLAGS="${CFLAGS:-}" \
