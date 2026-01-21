@@ -9,7 +9,7 @@
 #ifndef FILTER_H
 #define FILTER_H
 
-#include "bridge_types.h"
+#include "packet.h"
 
 /**
  * Initialize packet filter

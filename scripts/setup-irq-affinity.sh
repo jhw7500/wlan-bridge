@@ -45,7 +45,8 @@ fi
 # IRQ 찾기 함수
 find_irq() {
     local iface=$1
-    local irq=$(cat /proc/interrupts | grep -i "$iface" | awk '{print $1}' | tr -d ':' | head -1)
+    local irq
+    irq=$(cat /proc/interrupts | grep -i "$iface" | awk '{print $1}' | tr -d ':' | head -1)
     echo "$irq"
 }
 

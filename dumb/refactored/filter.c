@@ -4,6 +4,7 @@
  */
 
 #include "filter.h"
+#include <stdarg.h>
 #include <string.h>
 #include <netinet/ip.h>
 #include <net/if_arp.h>

@@ -32,9 +32,8 @@ coverage/
 *.o
 *.a
 *.so
-dumb/bin/
-dumb/environment-setup-armv8a-poky-linux
-dumb/make-for-imx8
+dumb/debug/
+dumb/release/
 
 # Keep session notes, ignore other logs/tmp outputs
 logs/*
