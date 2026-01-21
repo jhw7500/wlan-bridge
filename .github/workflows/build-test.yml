@@ -1,0 +1,119 @@
+name: Build and Test
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    name: Build Package
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            libpcap-dev \
+            jq \
+            dpkg-dev
+
+      - name: Verify wlan-bridge submodule
+        run: |
+          if [ ! -d "wlan-bridge/dumb" ]; then
+            echo "Error: wlan-bridge submodule not properly initialized"
+            exit 1
+          fi
+
+      - name: Run build script
+        run: |
+          chmod +x build.sh
+          ./build.sh
+
+      - name: Verify build artifacts
+        run: |
+          # Check if .deb package was created
+          if [ ! -f release/wlan.deb ]; then
+            echo "Error: wlan.deb not found in release/"
+            exit 1
+          fi
+
+          # Check package metadata
+          dpkg-deb -I release/wlan.deb
+
+          # Verify package contents
+          echo "Checking package contents..."
+          dpkg-deb -c release/wlan.deb | grep -E "(dumb|config.json|postinst|postrm|prerm)"
+
+          # Verify binaries exist in package
+          dpkg-deb -c release/wlan.deb | grep "usr/local/wlan-bridge/dumb/dumb" || exit 1
+          dpkg-deb -c release/wlan.deb | grep "usr/local/wlan-bridge/dumb/dumb-tpacket" || exit 1
+          dpkg-deb -c release/wlan.deb | grep "usr/local/etc/config.json" || exit 1
+
+          echo "All build artifacts verified!"
+
+      - name: Validate config.json
+        run: |
+          # Extract config.json from package
+          dpkg-deb -x release/wlan.deb /tmp/wlan-extract
+
+          # Validate JSON syntax
+          if [ -f /tmp/wlan-extract/usr/local/etc/config.json ]; then
+            jq empty /tmp/wlan-extract/usr/local/etc/config.json
+            echo "config.json is valid JSON"
+          else
+            echo "Error: config.json not found in package"
+            exit 1
+          fi
+
+      - name: Verify DEBIAN scripts
+        run: |
+          # Extract DEBIAN scripts
+          dpkg-deb -e release/wlan.deb /tmp/wlan-debian
+
+          # Check if maintainer scripts exist
+          if [ ! -f /tmp/wlan-debian/postinst ]; then
+            echo "Error: postinst not found"
+            exit 1
+          fi
+          if [ ! -f /tmp/wlan-debian/postrm ]; then
+            echo "Error: postrm not found"
+            exit 1
+          fi
+          if [ ! -f /tmp/wlan-debian/prerm ]; then
+            echo "Error: prerm not found"
+            exit 1
+          fi
+
+          echo "All DEBIAN scripts verified!"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wlan-package
+          path: |
+            release/*.deb
+            release/*.tar
+          retention-days: 7
+
+      - name: Build Summary
+        if: always()
+        run: |
+          echo "## Build Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -f release/wlan.deb ]; then
+            echo "✅ Package built successfully" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Package Info" >> $GITHUB_STEP_SUMMARY
+            dpkg-deb -I release/wlan.deb | grep -E "(Package|Version|Architecture)" >> $GITHUB_STEP_SUMMARY || true
+          else
+            echo "❌ Package build failed" >> $GITHUB_STEP_SUMMARY
+          fi
