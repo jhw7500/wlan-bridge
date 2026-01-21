@@ -40,6 +40,11 @@ jobs:
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
 
+            Start your comment with:
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+            Reviewer: Claude Code Review
+
             Please review this pull request and provide feedback on:
             - Code quality and best practices
             - Potential bugs or issues

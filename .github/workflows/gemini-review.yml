@@ -30,7 +30,7 @@ jobs:
         id: 'mint_identity_token'
         if: |-
           ${{ vars.APP_ID }}
-        uses: 'actions/create-github-app-token@29824e69f54612133e76f7eaac726eef6c875baf' # ratchet:actions/create-github-app-token@v2
+        uses: 'actions/create-github-app-token@a8d616148505b5069dccd32f177bb87d7f39123b' # ratchet:actions/create-github-app-token@v2
         with:
           app-id: '${{ vars.APP_ID }}'
           private-key: '${{ secrets.APP_PRIVATE_KEY }}'
@@ -42,7 +42,7 @@ jobs:
         uses: 'actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8' # ratchet:actions/checkout@v5
 
       - name: 'Run Gemini pull request review'
-        uses: 'google-github-actions/run-gemini-cli@main' # ratchet:exclude
+        uses: 'google-github-actions/run-gemini-cli@v0' # ratchet:exclude
         id: 'gemini_pr_review'
         env:
           GITHUB_TOKEN: '${{ steps.mint_identity_token.outputs.token || secrets.GITHUB_TOKEN || github.token }}'
@@ -107,4 +107,20 @@ jobs:
                 ]
               }
             }
-          prompt: '/gemini-review'
+          prompt: |-
+            Start your response with:
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+            Reviewer: Gemini Dispatch (Broad Review)
+
+            You are performing a deep, professional review that goes BEYOND the current diff.
+            Focus on missing improvements, latent risks, and hardening opportunities in areas touched by this PR.
+            Do NOT repeat change-specific findings that a diff-focused review would cover.
+            Exclude CI/CD commentary.
+
+            Provide:
+            1. Broader risks or gaps not addressed by this PR
+            2. Improvements that should be scheduled soon (not necessarily in this PR)
+            3. Any architectural or operational concerns related to the affected areas
+
+            Keep the response concise and structured with clear headings.
