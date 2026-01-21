@@ -3,117 +3,100 @@ name: Build and Test
 on:
   push:
     branches: [ main, master ]
+    paths:
+      - 'dumb/**'
+      - 'scripts/**'
+      - '**/*.sh'
+      - '.github/workflows/build-test.yml'
   pull_request:
     branches: [ main, master ]
+    paths:
+      - 'dumb/**'
+      - 'scripts/**'
+      - '**/*.sh'
+      - '.github/workflows/build-test.yml'
+  workflow_dispatch:
 
 jobs:
   build:
-    name: Build Package
+    name: Build wlan-bridge
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          submodules: recursive
+          submodules: false
 
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             build-essential \
-            libpcap-dev \
-            jq \
-            dpkg-dev
+            libpcap-dev
 
-      - name: Verify wlan-bridge submodule
+      - name: Build dumb
         run: |
-          if [ ! -d "wlan-bridge/dumb" ]; then
-            echo "Error: wlan-bridge submodule not properly initialized"
-            exit 1
-          fi
+          set -euo pipefail
 
-      - name: Run build script
-        run: |
-          chmod +x build.sh
-          ./build.sh
-
-      - name: Verify build artifacts
-        run: |
-          # Check if .deb package was created
-          if [ ! -f release/wlan.deb ]; then
-            echo "Error: wlan.deb not found in release/"
-            exit 1
-          fi
-
-          # Check package metadata
-          dpkg-deb -I release/wlan.deb
-
-          # Verify package contents
-          echo "Checking package contents..."
-          dpkg-deb -c release/wlan.deb | grep -E "(dumb|config.json|postinst|postrm|prerm)"
-
-          # Verify binaries exist in package
-          dpkg-deb -c release/wlan.deb | grep "usr/local/wlan-bridge/dumb/dumb" || exit 1
-          dpkg-deb -c release/wlan.deb | grep "usr/local/wlan-bridge/dumb/dumb-tpacket" || exit 1
-          dpkg-deb -c release/wlan.deb | grep "usr/local/etc/config.json" || exit 1
-
-          echo "All build artifacts verified!"
-
-      - name: Validate config.json
-        run: |
-          # Extract config.json from package
-          dpkg-deb -x release/wlan.deb /tmp/wlan-extract
-
-          # Validate JSON syntax
-          if [ -f /tmp/wlan-extract/usr/local/etc/config.json ]; then
-            jq empty /tmp/wlan-extract/usr/local/etc/config.json
-            echo "config.json is valid JSON"
+          # Backward/forward compatible build:
+          # - Old Makefile: `make -C dumb` -> outputs to dumb/bin/
+          # - New Makefile: `make -C dumb release` / `debug` -> outputs to dumb/release/ and dumb/debug/
+          if make -C dumb -n release >/dev/null 2>&1; then
+            make -C dumb release
           else
-            echo "Error: config.json not found in package"
-            exit 1
+            make -C dumb
           fi
 
-      - name: Verify DEBIAN scripts
+          if make -C dumb -n debug >/dev/null 2>&1; then
+            make -C dumb debug
+          else
+            echo "No debug target in dumb/Makefile, skipping debug build"
+          fi
+
+      - name: Run refactored unit tests
         run: |
-          # Extract DEBIAN scripts
-          dpkg-deb -e release/wlan.deb /tmp/wlan-debian
-
-          # Check if maintainer scripts exist
-          if [ ! -f /tmp/wlan-debian/postinst ]; then
-            echo "Error: postinst not found"
-            exit 1
-          fi
-          if [ ! -f /tmp/wlan-debian/postrm ]; then
-            echo "Error: postrm not found"
-            exit 1
-          fi
-          if [ ! -f /tmp/wlan-debian/prerm ]; then
-            echo "Error: prerm not found"
-            exit 1
+          if [ -f dumb/refactored/Makefile ]; then
+            make -C dumb/refactored test
+          else
+            echo "No dumb/refactored/Makefile found, skipping"
           fi
 
-          echo "All DEBIAN scripts verified!"
+      - name: Verify outputs
+        run: |
+          set -euo pipefail
 
-      - name: Upload build artifacts
+          # Determine release output directory.
+          if [ -f dumb/release/dumb ]; then
+            outdir="dumb/release"
+          elif [ -f dumb/bin/dumb ]; then
+            outdir="dumb/bin"
+          else
+            echo "ERROR: dumb binary not found (expected dumb/release/dumb or dumb/bin/dumb)" >&2
+            exit 1
+          fi
+
+          test -f "${outdir}/dumb"
+          test -f "${outdir}/dumb-tpacket"
+          file "${outdir}/dumb" "${outdir}/dumb-tpacket"
+
+          # Debug outputs are required only when a debug build target exists.
+          if make -C dumb -n debug >/dev/null 2>&1; then
+            test -f dumb/debug/dumb
+            test -f dumb/debug/dumb-tpacket
+            file dumb/debug/dumb dumb/debug/dumb-tpacket
+          fi
+
+      - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
-          name: wlan-package
+          name: wlan-bridge-binaries
           path: |
-            release/*.deb
-            release/*.tar
+            dumb/release/dumb
+            dumb/release/dumb-tpacket
+            dumb/debug/dumb
+            dumb/debug/dumb-tpacket
+            dumb/bin/dumb
+            dumb/bin/dumb-tpacket
+          if-no-files-found: warn
           retention-days: 7
-
-      - name: Build Summary
-        if: always()
-        run: |
-          echo "## Build Results" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          if [ -f release/wlan.deb ]; then
-            echo "✅ Package built successfully" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "### Package Info" >> $GITHUB_STEP_SUMMARY
-            dpkg-deb -I release/wlan.deb | grep -E "(Package|Version|Architecture)" >> $GITHUB_STEP_SUMMARY || true
-          else
-            echo "❌ Package build failed" >> $GITHUB_STEP_SUMMARY
-          fi
