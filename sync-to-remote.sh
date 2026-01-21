@@ -5,7 +5,7 @@ BRANCH=rate-limit-inject-logging
 BUNDLE="wlan-bridge.bundle"
 REMOTE="root@192.168.0.110"
 REMOTE_BUNDLE="/tmp/wlan-bridge.bundle"
-REMOTE_DIR="~/wlan-bridge"
+REMOTE_DIR="/root/wlan-bridge"
 
 echo "[local] create bundle for $BRANCH"
 git bundle create "$BUNDLE" "$BRANCH"
