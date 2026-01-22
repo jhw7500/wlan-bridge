@@ -11,7 +11,43 @@ on:
     #   - "src/**/*.jsx"
 
 jobs:
+  config:
+    runs-on: ubuntu-latest
+    outputs:
+      review_auto: ${{ steps.config.outputs.review_auto }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Load workflow config
+        id: config
+        run: |
+          REVIEW_AUTO=true
+
+          if [ -f ".github/workflow-config.yml" ]; then
+            in_review=0
+            while IFS= read -r line; do
+              if [[ "$line" =~ ^review:[[:space:]]*$ ]]; then
+                in_review=1
+                continue
+              fi
+              if [[ $in_review -eq 1 && "$line" =~ ^[^[:space:]] ]]; then
+                in_review=0
+              fi
+              if [[ $in_review -eq 1 && "$line" =~ ^[[:space:]]+auto:[[:space:]]*(true|false)[[:space:]]*$ ]]; then
+                REVIEW_AUTO="${BASH_REMATCH[1]}"
+                break
+              fi
+            done < ".github/workflow-config.yml"
+          fi
+
+          echo "review_auto=${REVIEW_AUTO}" >> "$GITHUB_OUTPUT"
+
   claude-review:
+    needs: config
+    if: ${{ needs.config.outputs.review_auto == 'true' }}
     # Optional: Filter by PR author
     # if: |
     #   github.event.pull_request.user.login == 'external-contributor' ||
@@ -59,4 +95,3 @@ jobs:
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
           claude_args: '--allowed-tools "Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*)"'
-
