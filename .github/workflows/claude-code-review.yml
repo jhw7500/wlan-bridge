@@ -14,4 +14,5 @@ jobs:
     uses: jhw7500/automation/.github/workflows/claude-code-review.yml@v1.15
     with:
       pr_number: ${{ github.event.pull_request.number }}
+      force_run: ${{ github.event.pull_request.head.repo.fork == false && github.event.pull_request.head.repo.full_name == github.repository }}
     secrets: inherit
