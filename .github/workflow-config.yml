@@ -7,4 +7,4 @@
 # - manual triggers (e.g. @gemini-cli /review, @claude) should keep working regardless.
 # - set review.auto=false to disable automatic PR reviews.
 review:
-  auto: true
+  auto: false

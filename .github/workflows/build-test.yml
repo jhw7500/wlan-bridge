@@ -16,10 +16,16 @@ on:
       - '**/*.sh'
       - '.github/workflows/build-test.yml'
   workflow_dispatch:
+    inputs:
+      force_run:
+        description: 'Run even if disabled'
+        type: boolean
+        default: false
 
 jobs:
   build:
     name: Build wlan-bridge
+    if: ${{ github.event.inputs.force_run == 'true' || vars.BUILD_TEST_ENABLED == 'true' }}
     runs-on: ubuntu-latest
 
     steps:
