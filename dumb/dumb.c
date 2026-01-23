@@ -459,16 +459,21 @@ forward_packet:
         atomic_fetch_add(&stats.per_thread[peer].errors, 1);
 
         if (cfg.enable_debug_log) {
-            // 첫 실패는 즉시, 이후에는 최소 1초 간격으로 요약 로그
+            // Rate-limited error logging: first error, then every 100th, and at least 1s apart
             static atomic_ulong error_count = 0;
-            static time_t last_log_sec = 0;
+            static _Atomic time_t last_log_sec = 0;
             unsigned long err_cnt = atomic_fetch_add(&error_count, 1) + 1;
-            time_t now = time(NULL);
-            if (last_log_sec == 0 || now - last_log_sec >= 1) {
-                const char *err = pcap_geterr(ifs.tx[peer]);
-                syslog(LOG_DEBUG, "pcap_inject(%u->%u) failed: %s (errors: %lu)",
-                       i, peer, err ? err : "unknown", err_cnt);
-                last_log_sec = now;
+
+            // Only check time() every 100 errors to reduce syscall overhead
+            if (err_cnt == 1 || err_cnt % 100 == 0) {
+                time_t now = time(NULL);
+                time_t last = atomic_load(&last_log_sec);
+                if (last == 0 || now - last >= 1) {
+                    const char *err = pcap_geterr(ifs.tx[peer]);
+                    syslog(LOG_DEBUG, "pcap_inject(%u->%u) failed: %s (errors: %lu)",
+                           i, peer, err ? err : "unknown", err_cnt);
+                    atomic_store(&last_log_sec, now);
+                }
             }
         }
     } else if ((unsigned int)ret < hdr->caplen) {
@@ -476,14 +481,20 @@ forward_packet:
         atomic_fetch_add(&stats.per_thread[i].dropped, 1);
 
         if (cfg.enable_debug_log) {
+            // Rate-limited partial inject logging: first, then every 100th, at least 1s apart
             static atomic_ulong partial_count = 0;
-            static time_t last_partial_log = 0;
+            static _Atomic time_t last_partial_log = 0;
             unsigned long p_cnt = atomic_fetch_add(&partial_count, 1) + 1;
-            time_t now = time(NULL);
-            if (last_partial_log == 0 || now - last_partial_log >= 1) {
-                syslog(LOG_ERR, "Partial inject %d/%u bytes on %u->%u (count: %lu)",
-                       ret, hdr->caplen, i, peer, p_cnt);
-                last_partial_log = now;
+
+            // Only check time() every 100 events to reduce syscall overhead
+            if (p_cnt == 1 || p_cnt % 100 == 0) {
+                time_t now = time(NULL);
+                time_t last = atomic_load(&last_partial_log);
+                if (last == 0 || now - last >= 1) {
+                    syslog(LOG_ERR, "Partial inject %d/%u bytes on %u->%u (count: %lu)",
+                           ret, hdr->caplen, i, peer, p_cnt);
+                    atomic_store(&last_partial_log, now);
+                }
             }
         }
     } else {
