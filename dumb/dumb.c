@@ -40,13 +40,22 @@ static atomic_int keep_running = ATOMIC_VAR_INIT(1);
 // Statistics display request flag (async-signal-safe)
 static volatile sig_atomic_t print_stats_requested = 0;
 
-// Packet statistics (atomic for thread-safety)
+// Cache line size for alignment (prevents false sharing)
+#define BRIDGE_CACHE_LINE_SIZE 64
+
+// Per-thread statistics (cache-line aligned to prevent false sharing)
+struct thread_stats {
+    atomic_ulong rx_packets;
+    atomic_ulong tx_packets;
+    atomic_ulong dropped;
+    atomic_ulong pcap_drop;
+    atomic_ulong errors;
+    char padding[BRIDGE_CACHE_LINE_SIZE - (5 * sizeof(atomic_ulong))];
+} __attribute__((aligned(BRIDGE_CACHE_LINE_SIZE)));
+
+// Packet statistics (cache-line aligned)
 static struct {
-    atomic_ulong rx_packets[2];   // Received packets per interface
-    atomic_ulong tx_packets[2];   // Transmitted packets per interface
-    atomic_ulong dropped[2];      // Dropped packets (inject failed)
-    atomic_ulong pcap_drop[2];    // Dropped by pcap (kernel buffer overflow)
-    atomic_ulong errors[2];       // Other errors
+    struct thread_stats per_thread[2];
     time_t start_time;            // Program start time
 } stats;
 
@@ -261,11 +270,11 @@ static void print_stats_impl(void) {
 
     fprintf(stderr, "\n=== Packet Statistics (uptime: %ld seconds) ===\n", uptime);
     for (int i = 0; i < 2; i++) {
-        unsigned long rx = atomic_load(&stats.rx_packets[i]);
-        unsigned long tx = atomic_load(&stats.tx_packets[i]);
-        unsigned long drop = atomic_load(&stats.dropped[i]);
-        unsigned long pcap_drop = atomic_load(&stats.pcap_drop[i]);
-        unsigned long err = atomic_load(&stats.errors[i]);
+        unsigned long rx = atomic_load(&stats.per_thread[i].rx_packets);
+        unsigned long tx = atomic_load(&stats.per_thread[i].tx_packets);
+        unsigned long drop = atomic_load(&stats.per_thread[i].dropped);
+        unsigned long pcap_drop = atomic_load(&stats.per_thread[i].pcap_drop);
+        unsigned long err = atomic_load(&stats.per_thread[i].errors);
 
         fprintf(stderr, "  Interface %d:\n", i);
         fprintf(stderr, "    RX:        %10lu packets (%lu pps)\n", rx, uptime > 0 ? rx/uptime : 0);
@@ -278,12 +287,12 @@ static void print_stats_impl(void) {
 
     // syslog에도 기록
     syslog(LOG_INFO, "Stats: if0 rx=%lu tx=%lu drop=%lu | if1 rx=%lu tx=%lu drop=%lu",
-           atomic_load(&stats.rx_packets[0]),
-           atomic_load(&stats.tx_packets[0]),
-           atomic_load(&stats.dropped[0]),
-           atomic_load(&stats.rx_packets[1]),
-           atomic_load(&stats.tx_packets[1]),
-           atomic_load(&stats.dropped[1]));
+           atomic_load(&stats.per_thread[0].rx_packets),
+           atomic_load(&stats.per_thread[0].tx_packets),
+           atomic_load(&stats.per_thread[0].dropped),
+           atomic_load(&stats.per_thread[1].rx_packets),
+           atomic_load(&stats.per_thread[1].tx_packets),
+           atomic_load(&stats.per_thread[1].dropped));
 }
 
 // 패킷이 브리지 자신으로 향하는지 확인 (IP만 검증, MAC 체크 제거)
@@ -430,11 +439,11 @@ static void ph(unsigned char *ifp, const struct pcap_pkthdr *hdr, const unsigned
 forward_packet:
 
     // RX 카운터 증가
-    atomic_fetch_add(&stats.rx_packets[i], 1);
+    atomic_fetch_add(&stats.per_thread[i].rx_packets, 1);
 
     // 상대 인터페이스 준비 여부 확인
     if (!both_ready() || ifs.tx[peer] == NULL) {
-        atomic_fetch_add(&stats.dropped[i], 1);
+        atomic_fetch_add(&stats.per_thread[i].dropped, 1);
         return; // 아직 준비 전이면 드롭
     }
 
@@ -446,8 +455,8 @@ forward_packet:
     }
     if (ret < 0) {
         // 에러 카운터 증가
-        atomic_fetch_add(&stats.dropped[i], 1);
-        atomic_fetch_add(&stats.errors[peer], 1);
+        atomic_fetch_add(&stats.per_thread[i].dropped, 1);
+        atomic_fetch_add(&stats.per_thread[peer].errors, 1);
 
         if (cfg.enable_debug_log) {
             // 첫 실패는 즉시, 이후에는 최소 1초 간격으로 요약 로그
@@ -464,7 +473,7 @@ forward_packet:
         }
     } else if ((unsigned int)ret < hdr->caplen) {
         // 부분 전송 감지 - 이는 심각한 문제
-        atomic_fetch_add(&stats.dropped[i], 1);
+        atomic_fetch_add(&stats.per_thread[i].dropped, 1);
 
         if (cfg.enable_debug_log) {
             static atomic_ulong partial_count = 0;
@@ -479,7 +488,7 @@ forward_packet:
         }
     } else {
         // TX 카운터 증가 (완전 전송 성공)
-        atomic_fetch_add(&stats.tx_packets[peer], 1);
+        atomic_fetch_add(&stats.per_thread[peer].tx_packets, 1);
     }
 }
 
@@ -549,7 +558,7 @@ static void *thr(void *ifp)
             stats_check_counter = 0;
             struct pcap_stat pstat;
             if (pcap_stats(ifs.rx[i], &pstat) == 0) {
-                atomic_store(&stats.pcap_drop[i], pstat.ps_drop + pstat.ps_ifdrop);
+                atomic_store(&stats.per_thread[i].pcap_drop, pstat.ps_drop + pstat.ps_ifdrop);
             }
         }
     }
