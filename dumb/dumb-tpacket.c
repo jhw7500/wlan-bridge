@@ -587,6 +587,27 @@ int main(int argc, char **argv) {
         fprintf(stderr, "WARNING: mlockall() failed: %s\n", strerror(errno));
     } else {
         fprintf(stderr, "Memory locked to prevent page faults\n");
+
+        // Ring buffer 사전 fault-in (페이지 폴트 방지)
+        // mlockall()은 미래 할당을 잠그지만 실제 페이지는 첫 접근 시 할당됨
+        // 여기서 모든 페이지를 미리 터치하여 런타임 페이지 폴트 제거
+        for (int i = 0; i < 2; i++) {
+            // RX ring pre-fault
+            if (interfaces[i].ring_rx) {
+                volatile uint8_t *ring = (volatile uint8_t *)interfaces[i].ring_rx;
+                for (size_t p = 0; p < interfaces[i].ring_size; p += 4096) {
+                    ring[p] = ring[p];  // 읽기로 페이지 fault-in
+                }
+            }
+            // TX ring pre-fault
+            if (interfaces[i].ring_tx) {
+                volatile uint8_t *ring = (volatile uint8_t *)interfaces[i].ring_tx;
+                for (size_t p = 0; p < interfaces[i].ring_tx_size; p += 4096) {
+                    ring[p] = ring[p];  // 읽기로 페이지 fault-in
+                }
+            }
+        }
+        fprintf(stderr, "Ring buffers pre-faulted to eliminate runtime page faults\n");
     }
 
     // 메인 루프
