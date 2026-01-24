@@ -15,8 +15,10 @@ LDFLAGS_TPACKET ?= -pthread
 # Output directories
 # - release/: default build output (stripped)
 # - debug/: debug build output (unstripped)
+# - native/: CPU-optimized build for production (stripped, -march=native -flto)
 RELEASEDIR ?= release
 DEBUGDIR ?= debug
+NATIVEDIR ?= native
 
 STRIP ?= strip
 
@@ -36,13 +38,20 @@ $(DEBUGDIR)/.dir:
 	mkdir -p $(DEBUGDIR)
 	@touch $@
 
+$(NATIVEDIR)/.dir:
+	mkdir -p $(NATIVEDIR)
+	@touch $@
+
 # Build variants
 RELEASE_CFLAGS ?= $(CFLAGS)
 DEBUG_CFLAGS ?= $(CFLAGS) -Og -g3
+NATIVE_CFLAGS ?= $(CFLAGS) -march=native -flto
 
 release: $(RELEASEDIR)/.dir $(RELEASEDIR)/$(TARGET_PCAP) $(RELEASEDIR)/$(TARGET_TPACKET)
 
 debug: $(DEBUGDIR)/.dir $(DEBUGDIR)/$(TARGET_PCAP) $(DEBUGDIR)/$(TARGET_TPACKET)
+
+native: $(NATIVEDIR)/.dir $(NATIVEDIR)/$(TARGET_PCAP) $(NATIVEDIR)/$(TARGET_TPACKET)
 
 # libpcap version (Phase 1 + 2.3)
 $(RELEASEDIR)/$(TARGET_PCAP): $(SRC_PCAP) | $(RELEASEDIR)/.dir
@@ -60,11 +69,20 @@ $(RELEASEDIR)/$(TARGET_TPACKET): $(SRC_TPACKET) | $(RELEASEDIR)/.dir
 $(DEBUGDIR)/$(TARGET_TPACKET): $(SRC_TPACKET) | $(DEBUGDIR)/.dir
 	$(CC) $(DEBUG_CFLAGS) -o $@ $(SRC_TPACKET) $(LDFLAGS_TPACKET)
 
+# Native optimized builds (production use on known hardware)
+$(NATIVEDIR)/$(TARGET_PCAP): $(SRC_PCAP) | $(NATIVEDIR)/.dir
+	$(CC) $(NATIVE_CFLAGS) -o $@ $(SRC_PCAP) $(LDFLAGS_PCAP)
+	$(STRIP) --strip-unneeded $@ 2>/dev/null || true
+
+$(NATIVEDIR)/$(TARGET_TPACKET): $(SRC_TPACKET) | $(NATIVEDIR)/.dir
+	$(CC) $(NATIVE_CFLAGS) -o $@ $(SRC_TPACKET) $(LDFLAGS_TPACKET)
+	$(STRIP) --strip-unneeded $@ 2>/dev/null || true
+
 clean:
 	rm -f $(RELEASEDIR)/$(TARGET_PCAP) $(RELEASEDIR)/$(TARGET_TPACKET)
 	rm -f $(DEBUGDIR)/$(TARGET_PCAP) $(DEBUGDIR)/$(TARGET_TPACKET)
-	@rm -f $(RELEASEDIR)/.dir $(DEBUGDIR)/.dir
-	@rmdir --ignore-fail-on-non-empty $(RELEASEDIR) 2>/dev/null || true
-	@rmdir --ignore-fail-on-non-empty $(DEBUGDIR) 2>/dev/null || true
+	rm -f $(NATIVEDIR)/$(TARGET_PCAP) $(NATIVEDIR)/$(TARGET_TPACKET)
+	@rm -f $(RELEASEDIR)/.dir $(DEBUGDIR)/.dir $(NATIVEDIR)/.dir
+	@rmdir --ignore-fail-on-non-empty $(RELEASEDIR) $(DEBUGDIR) $(NATIVEDIR) 2>/dev/null || true
 
-.PHONY: all release debug clean
+.PHONY: all release debug native clean
