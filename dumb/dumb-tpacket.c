@@ -588,6 +588,12 @@ int main(int argc, char **argv) {
     } else {
         fprintf(stderr, "Memory locked to prevent page faults\n");
 
+        // 시스템 페이지 크기 동적 조회 (이식성)
+        long page_size = sysconf(_SC_PAGESIZE);
+        if (page_size <= 0) {
+            page_size = 4096;  // fallback for error cases
+        }
+
         // Ring buffer 사전 fault-in (페이지 폴트 방지)
         // mlockall()은 미래 할당을 잠그지만 실제 페이지는 첫 접근 시 할당됨
         // 여기서 모든 페이지를 미리 터치하여 런타임 페이지 폴트 제거
@@ -595,15 +601,17 @@ int main(int argc, char **argv) {
             // RX ring pre-fault
             if (interfaces[i].ring_rx) {
                 volatile uint8_t *ring = (volatile uint8_t *)interfaces[i].ring_rx;
-                for (size_t p = 0; p < interfaces[i].ring_size; p += 4096) {
-                    ring[p] = ring[p];  // 읽기로 페이지 fault-in
+                for (size_t p = 0; p < interfaces[i].ring_size; p += page_size) {
+                    volatile uint8_t dummy = ring[p];  // 읽기 전용 터치 (쓰기 없음)
+                    (void)dummy;  // 컴파일러 경고 방지
                 }
             }
             // TX ring pre-fault
             if (interfaces[i].ring_tx) {
                 volatile uint8_t *ring = (volatile uint8_t *)interfaces[i].ring_tx;
-                for (size_t p = 0; p < interfaces[i].ring_tx_size; p += 4096) {
-                    ring[p] = ring[p];  // 읽기로 페이지 fault-in
+                for (size_t p = 0; p < interfaces[i].ring_tx_size; p += page_size) {
+                    volatile uint8_t dummy = ring[p];  // 읽기 전용 터치 (쓰기 없음)
+                    (void)dummy;  // 컴파일러 경고 방지
                 }
             }
         }
