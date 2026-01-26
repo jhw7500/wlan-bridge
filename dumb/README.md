@@ -24,6 +24,13 @@ make
 sudo ./dumb eth0 wlan0
 ```
 
+## 요구 사항 (Requirements)
+
+### 커널 설정 (Kernel Config)
+`dumb-tpacket` (TPACKET_V3) 버전을 사용하기 위해서는 다음 커널 설정이 필요합니다:
+- `CONFIG_PACKET=y` (또는 `m`)
+- `CONFIG_PACKET_MMAP=y`
+
 ## 옵션(튜닝)
 
 `dumb`는 기본 설정으로 동작하지만, 환경/드라이버/트래픽 특성에 따라 지터/CPU/처리량을 조정할 수 있도록 옵션을 제공합니다.

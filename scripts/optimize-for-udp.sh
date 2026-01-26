@@ -63,15 +63,20 @@ iwconfig $WLAN_IF power off 2>/dev/null && \
 echo ""
 echo -e "${BLUE}4. Ring buffer 크기 증가${NC}"
 
-# Ethernet
-ethtool -G $ETH_IF rx 4096 tx 4096 2>/dev/null && \
-    echo "  ✓ $ETH_IF: RX/TX ring buffer → 4096" || \
-    echo -e "  ${YELLOW}⚠ $ETH_IF: Ring buffer 조정 실패 (드라이버 미지원 가능)${NC}"
+if command -v ethtool &> /dev/null; then
+    # Ethernet
+    ethtool -G $ETH_IF rx 4096 tx 4096 2>/dev/null && \
+        echo "  ✓ $ETH_IF: RX/TX ring buffer → 4096" || \
+        echo -e "  ${YELLOW}⚠ $ETH_IF: Ring buffer 조정 실패 (드라이버 미지원 가능)${NC}"
 
-# Wireless
-ethtool -G $WLAN_IF rx 4096 tx 4096 2>/dev/null && \
-    echo "  ✓ $WLAN_IF: RX/TX ring buffer → 4096" || \
-    echo -e "  ${YELLOW}⚠ $WLAN_IF: Ring buffer 조정 실패 (드라이버 미지원 가능)${NC}"
+    # Wireless
+    ethtool -G $WLAN_IF rx 4096 tx 4096 2>/dev/null && \
+        echo "  ✓ $WLAN_IF: RX/TX ring buffer → 4096" || \
+        echo -e "  ${YELLOW}⚠ $WLAN_IF: Ring buffer 조정 실패 (드라이버 미지원 가능)${NC}"
+else
+    echo -e "${YELLOW}ethtool이 설치되지 않아 ring buffer 조정을 건너뜁니다.${NC}"
+    echo "설치: sudo apt-get install ethtool"
+fi
 
 # 5. UDP 특화 설정
 echo ""
