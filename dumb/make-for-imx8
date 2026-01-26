@@ -41,6 +41,7 @@ PKG_CONFIG_SYSROOT_DIR="$PKG_CONFIG_SYSROOT_DIR" \
     make \
         CC="$CC" \
         CFLAGS="${CFLAGS:-}" \
+        RELEASE_CFLAGS="${CFLAGS:-} -flto" \
         LDFLAGS_PCAP="${LDFLAGS:-} -lpcap -pthread" \
         LDFLAGS_TPACKET="${LDFLAGS:-} -pthread" \
         "$@"

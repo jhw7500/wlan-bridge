@@ -493,6 +493,18 @@ static void *interface_thread(void *arg) {
     return NULL;
 }
 
+// Helper function to pre-fault ring buffer pages
+static void pre_fault_ring(volatile void *ring_base, size_t ring_size, long page_size) {
+    if (!ring_base || page_size <= 0) {
+        return;
+    }
+    volatile uint8_t *ring = (volatile uint8_t *)ring_base;
+    for (size_t p = 0; p < ring_size; p += page_size) {
+        volatile uint8_t dummy = ring[p];
+        (void)dummy;
+    }
+}
+
 int main(int argc, char **argv) {
     if (argc != 3) {
         fprintf(stderr, "Usage: %s <interface0> <interface1>\n", argv[0]);
@@ -587,6 +599,23 @@ int main(int argc, char **argv) {
         fprintf(stderr, "WARNING: mlockall() failed: %s\n", strerror(errno));
     } else {
         fprintf(stderr, "Memory locked to prevent page faults\n");
+
+        // 시스템 페이지 크기 동적 조회 (이식성)
+        long page_size = sysconf(_SC_PAGESIZE);
+        if (page_size <= 0) {
+            page_size = 4096;  // fallback for error cases
+        }
+
+        // Ring buffer 사전 fault-in (페이지 폴트 방지)
+        // mlockall()은 미래 할당을 잠그지만 실제 페이지는 첫 접근 시 할당됨
+        // 여기서 모든 페이지를 미리 터치하여 런타임 페이지 폴트 제거
+        for (int i = 0; i < 2; i++) {
+            // RX ring pre-fault
+            pre_fault_ring(interfaces[i].ring_rx, interfaces[i].ring_size, page_size);
+            // TX ring pre-fault
+            pre_fault_ring(interfaces[i].ring_tx, interfaces[i].ring_tx_size, page_size);
+        }
+        fprintf(stderr, "Ring buffers pre-faulted to eliminate runtime page faults\n");
     }
 
     // 메인 루프
