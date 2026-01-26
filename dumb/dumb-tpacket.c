@@ -493,6 +493,18 @@ static void *interface_thread(void *arg) {
     return NULL;
 }
 
+// Helper function to pre-fault ring buffer pages
+static void pre_fault_ring(volatile void *ring_base, size_t ring_size, long page_size) {
+    if (!ring_base || page_size <= 0) {
+        return;
+    }
+    volatile uint8_t *ring = (volatile uint8_t *)ring_base;
+    for (size_t p = 0; p < ring_size; p += page_size) {
+        volatile uint8_t dummy = ring[p];
+        (void)dummy;
+    }
+}
+
 int main(int argc, char **argv) {
     if (argc != 3) {
         fprintf(stderr, "Usage: %s <interface0> <interface1>\n", argv[0]);
@@ -599,21 +611,9 @@ int main(int argc, char **argv) {
         // 여기서 모든 페이지를 미리 터치하여 런타임 페이지 폴트 제거
         for (int i = 0; i < 2; i++) {
             // RX ring pre-fault
-            if (interfaces[i].ring_rx) {
-                volatile uint8_t *ring = (volatile uint8_t *)interfaces[i].ring_rx;
-                for (size_t p = 0; p < interfaces[i].ring_size; p += page_size) {
-                    volatile uint8_t dummy = ring[p];  // 읽기 전용 터치 (쓰기 없음)
-                    (void)dummy;  // 컴파일러 경고 방지
-                }
-            }
+            pre_fault_ring(interfaces[i].ring_rx, interfaces[i].ring_size, page_size);
             // TX ring pre-fault
-            if (interfaces[i].ring_tx) {
-                volatile uint8_t *ring = (volatile uint8_t *)interfaces[i].ring_tx;
-                for (size_t p = 0; p < interfaces[i].ring_tx_size; p += page_size) {
-                    volatile uint8_t dummy = ring[p];  // 읽기 전용 터치 (쓰기 없음)
-                    (void)dummy;  // 컴파일러 경고 방지
-                }
-            }
+            pre_fault_ring(interfaces[i].ring_tx, interfaces[i].ring_tx_size, page_size);
         }
         fprintf(stderr, "Ring buffers pre-faulted to eliminate runtime page faults\n");
     }

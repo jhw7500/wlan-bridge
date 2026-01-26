@@ -43,9 +43,9 @@ $(NATIVEDIR)/.dir:
 	@touch $@
 
 # Build variants
-# Release build now includes -march=native and -flto for optimal performance
+# Release build with LTO but remains portable (use 'native' target for -march=native)
 # Override RELEASE_CFLAGS if cross-compiling to a different architecture
-RELEASE_CFLAGS ?= $(CFLAGS) -march=native -flto
+RELEASE_CFLAGS ?= $(CFLAGS) -flto
 DEBUG_CFLAGS ?= $(CFLAGS) -Og -g3
 NATIVE_CFLAGS ?= $(CFLAGS) -march=native -flto
 
