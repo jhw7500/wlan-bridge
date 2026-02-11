@@ -27,8 +27,11 @@
 #include <poll.h>
 #include <ifaddrs.h>
 
-// Graceful shutdown flag
-static volatile sig_atomic_t keep_running = 1;
+// Graceful shutdown flag (atomic for proper memory ordering)
+static atomic_int keep_running = ATOMIC_VAR_INIT(1);
+
+// Statistics display request flag (async-signal-safe)
+static volatile sig_atomic_t print_stats_requested = 0;
 
 // Cache line size for alignment (prevents false sharing)
 #define BRIDGE_CACHE_LINE_SIZE 64
@@ -94,12 +97,17 @@ static struct interface interfaces[2];
 // 시그널 핸들러
 static void sighandler(int sig) {
     (void)sig;
-    keep_running = 0;
+    atomic_store(&keep_running, 0);
 }
 
-// 통계 출력
-static void print_stats(int sig) {
+// Async-signal-safe: 시그널 핸들러에서는 플래그만 설정
+static void sigusr1_handler(int sig) {
     (void)sig;
+    print_stats_requested = 1;
+}
+
+// 실제 통계 출력 함수 (안전한 컨텍스트에서 호출)
+static void print_stats_impl(void) {
     time_t now = time(NULL);
     time_t uptime = now - stats.start_time;
 
@@ -365,7 +373,7 @@ static void *interface_thread(void *arg) {
     pfd.events = POLLIN | POLLERR;
     pfd.revents = 0;
 
-    while (keep_running) {
+    while (atomic_load(&keep_running)) {
         // Block이 준비될 때까지 poll (timeout은 retire timeout보다 조금 크게)
         int ret = poll(&pfd, 1, 10);
         if (ret < 0) {
@@ -523,7 +531,7 @@ int main(int argc, char **argv) {
     // 시그널 핸들러
     signal(SIGINT, sighandler);
     signal(SIGTERM, sighandler);
-    signal(SIGUSR1, print_stats);
+    signal(SIGUSR1, sigusr1_handler);
 
     // 통계 초기화
     memset(&stats, 0, sizeof(stats));
@@ -623,8 +631,14 @@ int main(int argc, char **argv) {
     fprintf(stderr, "  Usage: kill -USR1 %d\n", getpid());
     syslog(LOG_INFO, "TPACKET_V3 bridge started (PID %d)", getpid());
 
-    while (keep_running) {
+    while (atomic_load(&keep_running)) {
         sleep(1);
+
+        // 통계 출력 요청 확인 (async-signal-safe)
+        if (print_stats_requested) {
+            print_stats_requested = 0;
+            print_stats_impl();
+        }
     }
 
     // Graceful shutdown
@@ -651,7 +665,7 @@ int main(int argc, char **argv) {
     }
 
     // 최종 통계
-    print_stats(0);
+    print_stats_impl();
 
     fprintf(stderr, "Shutdown complete.\n");
     syslog(LOG_INFO, "TPACKET_V3 bridge stopped");

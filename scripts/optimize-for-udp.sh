@@ -92,15 +92,15 @@ echo -e "${BLUE}6. 영구 설정 (선택사항)${NC}"
 read -p "재부팅 후에도 유지하시겠습니까? (y/N): " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
-    echo "# UDP 고속 전송 최적화 ($(date))" >> /etc/sysctl.conf
-    echo "net.core.wmem_max=16777216" >> /etc/sysctl.conf
-    echo "net.core.wmem_default=16777216" >> /etc/sysctl.conf
-    echo "net.core.rmem_max=16777216" >> /etc/sysctl.conf
-    echo "net.core.rmem_default=16777216" >> /etc/sysctl.conf
-    echo "net.core.netdev_max_backlog=10000" >> /etc/sysctl.conf
-    echo "net.ipv4.udp_mem=8388608 12582912 16777216" >> /etc/sysctl.conf
-    echo "net.ipv4.udp_rmem_min=16384" >> /etc/sysctl.conf
-    echo "net.ipv4.udp_wmem_min=16384" >> /etc/sysctl.conf
+    # 중복 방지: 기존 항목이 없을 때만 추가
+    grep -q "^net.core.wmem_max=" /etc/sysctl.conf || echo "net.core.wmem_max=16777216" >> /etc/sysctl.conf
+    grep -q "^net.core.wmem_default=" /etc/sysctl.conf || echo "net.core.wmem_default=16777216" >> /etc/sysctl.conf
+    grep -q "^net.core.rmem_max=" /etc/sysctl.conf || echo "net.core.rmem_max=16777216" >> /etc/sysctl.conf
+    grep -q "^net.core.rmem_default=" /etc/sysctl.conf || echo "net.core.rmem_default=16777216" >> /etc/sysctl.conf
+    grep -q "^net.core.netdev_max_backlog=" /etc/sysctl.conf || echo "net.core.netdev_max_backlog=10000" >> /etc/sysctl.conf
+    grep -q "^net.ipv4.udp_mem=" /etc/sysctl.conf || echo "net.ipv4.udp_mem=8388608 12582912 16777216" >> /etc/sysctl.conf
+    grep -q "^net.ipv4.udp_rmem_min=" /etc/sysctl.conf || echo "net.ipv4.udp_rmem_min=16384" >> /etc/sysctl.conf
+    grep -q "^net.ipv4.udp_wmem_min=" /etc/sysctl.conf || echo "net.ipv4.udp_wmem_min=16384" >> /etc/sysctl.conf
     echo "  ✓ /etc/sysctl.conf 업데이트 완료"
 
     # rc.local에 인터페이스 설정 추가
