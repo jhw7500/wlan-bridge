@@ -4,51 +4,105 @@ on:
   push:
     branches: [ main, master ]
     paths:
-      - '**/*.sh'
-      - 'dumb/make-for-imx8'
+      - '**.sh'
+      - '**/postinst'
+      - '**/postrm'
+      - '**/prerm'
       - '.github/workflows/shellcheck.yml'
+      - '.github/workflow-config.yml'
   pull_request:
     branches: [ main, master ]
     paths:
-      - '**/*.sh'
-      - 'dumb/make-for-imx8'
+      - '**.sh'
+      - '**/postinst'
+      - '**/postrm'
+      - '**/prerm'
       - '.github/workflows/shellcheck.yml'
+      - '.github/workflow-config.yml'
   workflow_dispatch:
     inputs:
       force_run:
-        description: 'Run even if disabled'
+        description: 'Run even if disabled in config'
         type: boolean
         default: false
 
 jobs:
+  check-enabled:
+    name: Check if enabled
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github
+
+      - name: Check workflow config
+        id: check
+        uses: ./.github/actions/check-workflow-enabled
+        with:
+          workflow-name: shellcheck
+          force-run: ${{ github.event.inputs.force_run || 'false' }}
+
   shellcheck:
     name: ShellCheck Analysis
-    if: ${{ github.event.inputs.force_run == 'true' || vars.SHELLCHECK_ENABLED == 'true' }}
+    needs: check-enabled
+    if: needs.check-enabled.outputs.enabled == 'true'
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          submodules: false
-
-      - name: Install ShellCheck
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y shellcheck
+          submodules: recursive
 
       - name: Run ShellCheck
+        uses: ludeeus/action-shellcheck@2.0.0
+        with:
+          scandir: '.'
+          severity: warning
+          format: gcc
+
+      - name: Run ShellCheck on dumb/ make-for-imx8
         run: |
-          set -euo pipefail
+          echo "Checking dumb/ make-for-imx8..."
 
-          files=$(git ls-files '*.sh' || true)
-          if [ -n "$files" ]; then
-            shellcheck -x -s bash -S warning -f gcc $files
-          else
-            echo "No .sh files tracked by git"
-          fi
-
-          # Also check scripts without a .sh extension.
+          # Check make-for-imx8 (if exists)
           if [ -f dumb/make-for-imx8 ]; then
-            shellcheck -x -s bash -S warning -f gcc dumb/make-for-imx8
+            echo "Checking make-for-imx8..."
+            shellcheck -x -s bash dumb/make-for-imx8 || exit 1
           fi
+
+          # Check sync-to-remote.sh
+          if [ -f sync-to-remote.sh ]; then
+            echo "Checking sync-to-remote.sh..."
+            shellcheck -x -s bash sync-to-remote.sh || exit 1
+          fi
+
+          # Check scp-to-remote.sh
+          if [ -f scp-to-remote.sh ]; then
+            echo "Checking scp-to-remote.sh..."
+            shellcheck -x -s bash scp-to-remote.sh || exit 1
+          fi
+
+          echo "All additional shell scripts passed ShellCheck!"
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## ShellCheck Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "ShellCheck analysis completed for all shell scripts." >> $GITHUB_STEP_SUMMARY
+
+  skipped:
+    name: Workflow Skipped
+    needs: check-enabled
+    if: needs.check-enabled.outputs.enabled != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notice
+        run: |
+          echo "::notice::ShellCheck workflow is disabled in .github/workflow-config.yml"
+          echo "## Workflow Skipped" >> $GITHUB_STEP_SUMMARY
+          echo "ShellCheck is disabled in workflow-config.yml" >> $GITHUB_STEP_SUMMARY

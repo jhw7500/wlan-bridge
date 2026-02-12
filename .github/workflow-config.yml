@@ -7,10 +7,50 @@
 #
 # NOTE: GitHub Actions does not allow dynamic refs in `uses: ...@ref`, so this value
 # is used by a repo automation workflow that opens a PR updating all `uses:` refs.
-automation_ref: v1.15
+automation_ref: v1.23
 
 # Global review behavior.
 # - manual triggers (e.g. @gemini-cli /review, @claude) should keep working regardless.
 # - set review.auto=false to disable automatic PR reviews.
 review:
   auto: false
+
+# Per-workflow toggles.
+# Comment-driven workflows should be explicitly controllable even in internal repos.
+workflows:
+  # Repo-specific CI workflows
+  build-test:
+    enabled: true
+  shellcheck:
+    enabled: true
+
+  # Repo automation helpers
+  bump-automation-ref:
+    enabled: true
+
+  # Shared automation workflow wrappers
+  auto-rereview-request:
+    enabled: false
+  claude-code-review:
+    enabled: true
+  gemini-auto-review:
+    enabled: true
+  gemini-dispatch:
+    enabled: true
+  gemini-invoke:
+    enabled: true
+  gemini-review:
+    enabled: true
+  gemini-scheduled-triage:
+    enabled: false  # Disabled: 스케줄 트리거 비활성화
+  gemini-triage:
+    enabled: true
+
+  opencode:
+    enabled: true
+  opencode-auto-review:
+    enabled: true
+  gemini-chat:
+    enabled: true
+  claude:
+    enabled: true
