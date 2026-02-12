@@ -95,13 +95,14 @@ int config_parse_args(struct bridge_config *cfg, int argc, char **argv,
         {"mac-filter", no_argument, 0, 11},
         {"ip-filter", no_argument, 0, 12},
         {"no-debug", no_argument, 0, 13},
+        {"version", no_argument, 0, 'v'},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0},
     };
 
     int opt;
     optind = 1;
-    while ((opt = getopt_long(argc, argv, "h", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "hv", long_opts, NULL)) != -1) {
         switch (opt) {
         case 1: cfg->dispatch_budget = clamp_int(safe_atoi(optarg, 64), 1, 4096); break;
         case 2: cfg->enable_affinity = 0; break;
@@ -116,6 +117,10 @@ int config_parse_args(struct bridge_config *cfg, int argc, char **argv,
         case 11: cfg->enable_mac_filter = 1; break;
         case 12: cfg->enable_ip_filter = 1; break;
         case 13: cfg->enable_debug_log = 0; break;
+        case 'v':
+            printf("%s version %s\n", BRIDGE_NAME, BRIDGE_VERSION);
+            printf("Features: %s\n", BRIDGE_FEATURES);
+            return 1;
         case 'h': config_print_usage(stdout, argv[0]); return 1;
         default: config_print_usage(stderr, argv[0]); return -1;
         }
@@ -150,6 +155,7 @@ void config_print_usage(FILE *out, const char *prog) {
             "  --mac-filter            Enable MAC-based reinject skip (env WBRIDGE_MAC_FILTER=1, default off)\n"
             "  --ip-filter             Enable IP-based reinject skip (env WBRIDGE_IP_FILTER=1, default off)\n"
             "  --no-debug              Disable verbose logs (env WBRIDGE_DEBUG=0, default on)\n"
+            "  -v, --version           Show version and exit\n"
             "  -h, --help              Show help\n",
             prog);
 }

@@ -43,8 +43,10 @@ int main(int argc, char **argv) {
 
     int rc = config_parse_args(&ctx->config, argc, argv, &if0_name, &if1_name);
     if (rc != 0) {
+        // rc > 0 means handled (help or version), rc < 0 means error
+        int exit_code = (rc > 0) ? 0 : 1;
         bridge_cleanup(ctx);
-        return rc > 0 ? 0 : 1;
+        return exit_code;
     }
 
     openlog(BRIDGE_NAME, LOG_PID | LOG_CONS, LOG_LOCAL0);
