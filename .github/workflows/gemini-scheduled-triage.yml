@@ -1,14 +1,49 @@
 name: Gemini Scheduled Issue Triage
 
 on:
+  schedule:
+    - cron: '0 * * * *'
+  push:
+    branches:
+      - main
+      - 'release/**/*'
+    paths:
+      - '.github/workflows/gemini-scheduled-triage.yml'
+  pull_request:
+    branches:
+      - main
+      - 'release/**/*'
+    paths:
+      - '.github/workflows/gemini-scheduled-triage.yml'
   workflow_dispatch:
 
 jobs:
+  check-enabled:
+    name: Check if enabled
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github
+
+      - name: Check workflow config
+        id: check
+        uses: ./.github/actions/check-workflow-enabled
+        with:
+          workflow-name: gemini-scheduled-triage
+
   triage:
+    needs: check-enabled
+    if: needs.check-enabled.outputs.enabled == 'true'
     permissions:
       contents: read
       id-token: write
       issues: write
       pull-requests: write
-    uses: jhw7500/automation/.github/workflows/gemini-scheduled-triage.yml@v1.16
+    uses: jhw7500/automation/.github/workflows/gemini-scheduled-triage.yml@v1.23
     secrets: inherit

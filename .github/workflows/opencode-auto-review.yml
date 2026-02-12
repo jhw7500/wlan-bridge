@@ -1,4 +1,4 @@
-name: Claude Code Review
+name: OpenCode Auto Review
 
 on:
   pull_request:
@@ -22,7 +22,7 @@ jobs:
         id: check
         uses: ./.github/actions/check-workflow-enabled
         with:
-          workflow-name: claude-code-review
+          workflow-name: opencode-auto-review
 
   auto-review:
     needs: check-enabled
@@ -31,5 +31,5 @@ jobs:
       contents: read
       pull-requests: write
       id-token: write
-    uses: jhw7500/automation/.github/workflows/claude-code-review.yml@v1.23
+    uses: jhw7500/automation/.github/workflows/opencode-auto-review.yml@v1.23
     secrets: inherit

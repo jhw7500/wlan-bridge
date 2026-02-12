@@ -1,18 +1,35 @@
-name: Gemini Auto PR Review
+name: Gemini Auto Review
 
 on:
   pull_request:
     types: [opened, synchronize]
 
 jobs:
-  gemini-review:
-    if: ${{ github.event.pull_request.head.repo.fork == false && github.event.pull_request.head.repo.full_name == github.repository }}
+  check-enabled:
+    name: Check if enabled
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github
+
+      - name: Check workflow config
+        id: check
+        uses: ./.github/actions/check-workflow-enabled
+        with:
+          workflow-name: gemini-auto-review
+
+  auto-review:
+    needs: check-enabled
+    if: needs.check-enabled.outputs.enabled == 'true'
     permissions:
       contents: read
       pull-requests: write
-      issues: write
       id-token: write
-    uses: jhw7500/automation/.github/workflows/gemini-auto-review.yml@v1.16
-    with:
-      pr_number: ${{ github.event.pull_request.number }}
+    uses: jhw7500/automation/.github/workflows/gemini-auto-review.yml@v1.23
     secrets: inherit
