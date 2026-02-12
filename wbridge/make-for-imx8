@@ -1,0 +1,39 @@
+#!/bin/bash
+# i.MX8 크로스 컴파일을 위한 리팩토링 버전 빌드 스크립트
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
+# SDK 경로 설정
+if [ -z "${SDK_LOC:-}" ]; then
+    if [ -e "/shared/fsl-imx-xwayland/6.6-nanbield/environment-setup-armv8a-poky-linux" ]; then
+        SDK_LOC=/shared/fsl-imx-xwayland/6.6-nanbield
+    else
+        SDK_LOC="$SCRIPT_DIR"
+    fi
+fi
+
+[ -z "${SDK_NAME:-}" ] && SDK_NAME=armv8a-poky-linux
+
+[ ! -e "${SDK_LOC}/environment-setup-${SDK_NAME}" ] && {
+    echo "ERROR: SDK environment script not found at ${SDK_LOC}/environment-setup-${SDK_NAME}" >&2
+    exit 1
+}
+
+# SDK 환경 로드
+# shellcheck disable=SC1090
+. "${SDK_LOC}/environment-setup-${SDK_NAME}"
+
+SYSROOT="${SDK_LOC}/sysroots/${SDK_NAME}"
+export PKG_CONFIG_SYSROOT_DIR="$SYSROOT"
+export PKG_CONFIG_PATH="$SYSROOT/usr/lib/pkgconfig:$SYSROOT/usr/share/pkgconfig"
+export PKG_CONFIG_LIBDIR="$SYSROOT/usr/lib/pkgconfig:$SYSROOT/usr/share/pkgconfig"
+
+# 리팩토링된 Makefile 인자에 맞춰 make 실행
+make \
+    CC="$CC" \
+    CFLAGS="${CFLAGS:-} -I." \
+    RELEASE_CFLAGS="${CFLAGS:-} -flto -I." \
+    LDFLAGS="${LDFLAGS:-} -lpcap -pthread" \
+    "$@"

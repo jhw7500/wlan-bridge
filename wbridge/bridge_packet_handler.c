@@ -16,6 +16,20 @@
 // Forward declaration for context access
 extern struct bridge_context *g_bridge_context;
 
+// Forward declarations for internal functions
+int bridge_packet_forward(struct bridge_context *ctx,
+                          const struct packet_info *pkt,
+                          bridge_interface_t iface_idx);
+
+void bridge_log_inject_error(struct bridge_context *ctx,
+                             bridge_interface_t iface_idx,
+                             int inject_result);
+
+void bridge_log_partial_inject(struct bridge_context *ctx,
+                               bridge_interface_t iface_idx,
+                               int injected,
+                               uint32_t expected);
+
 /**
  * Refactored packet handler callback for pcap_dispatch
  *
