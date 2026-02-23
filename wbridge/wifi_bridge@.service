@@ -10,6 +10,9 @@ StartLimitAction=reboot
 
 [Service]
 Type=simple
+# 최적화 모드: WBRIDGE_MODE=latency|normal|thermal, WBRIDGE_OPTIMIZE=0|1
+EnvironmentFile=-/etc/default/wbridge
+EnvironmentFile=-/run/wbridge.thermal.env
 ExecStart=/usr/local/scripts/wifi_bridge.sh %i
 ExecStop=/usr/local/scripts/wifi_bridge_stop.sh %i
 ExecStopPost=/bin/sleep 1

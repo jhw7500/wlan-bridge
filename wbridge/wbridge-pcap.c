@@ -109,6 +109,15 @@ static int env_to_int(const char *key, int default_value)
     return (int)v;
 }
 
+static const char *env_to_str(const char *key, const char *default_value)
+{
+    const char *env = getenv(key);
+    if (!env || !*env) {
+        return default_value;
+    }
+    return env;
+}
+
 static int clamp_int(int v, int min_v, int max_v)
 {
     if (v < min_v) return min_v;
@@ -688,6 +697,12 @@ int main(int argc, char **argv)
     syslog(LOG_INFO, "%s v%s started (interfaces: %s <-> %s)",
            PROGRAM_NAME, VERSION, if0, if1);
     syslog(LOG_INFO, "Features: %s", BUILD_FEATURES);
+    syslog(LOG_INFO, "Profile: ver=%s requested=%s effective=%s thermal=%s force=%s",
+           env_to_str("WBRIDGE_PROFILE_VERSION", "1"),
+           env_to_str("WBRIDGE_MODE_REQUESTED", "unknown"),
+           env_to_str("WBRIDGE_PROFILE_EFFECTIVE", "unknown"),
+           env_to_str("WBRIDGE_THERMAL_STATE", "unknown"),
+           env_to_str("WBRIDGE_MODE_FORCE", "0"));
 
     // 시그널 핸들러 등록
     signal(SIGINT, sighandler);
