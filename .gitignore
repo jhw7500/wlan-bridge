@@ -32,8 +32,8 @@ coverage/
 *.o
 *.a
 *.so
-dumb/debug/
-dumb/release/
+wbridge/debug/
+wbridge/release/
 
 # Keep session notes, ignore other logs/tmp outputs
 logs/*
@@ -48,3 +48,5 @@ projects/wlan-package/
 gha-creds-*.json
 
 tmp/
+
+
