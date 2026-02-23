@@ -1,8 +1,8 @@
 name: Gemini Scheduled Issue Triage
 
 on:
-  schedule:
-    - cron: '0 * * * *'
+  # schedule:
+  #   - cron: '0 * * * *'
   push:
     branches:
       - main
