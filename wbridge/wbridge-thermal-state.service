@@ -1,0 +1,13 @@
+[Unit]
+Description=WBRIDGE thermal state updater
+After=local-fs.target
+Wants=local-fs.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/default/wbridge
+ExecStart=/usr/local/scripts/wbridge_thermal_state_update.sh
+User=root
+
+[Install]
+WantedBy=multi-user.target
