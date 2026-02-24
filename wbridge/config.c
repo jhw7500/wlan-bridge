@@ -9,6 +9,7 @@
 #include <getopt.h>
 #include <limits.h>
 #include <errno.h>
+#include <syslog.h>
 
 // Default values
 #define WBRIDGE_SNAPLEN 1600
@@ -21,6 +22,14 @@ static int env_to_int(const char *key, int default_value) {
     long v = strtol(env, &end, 10);
     if (!end || end == env || *end != '\0') return default_value;
     return (int)v;
+}
+
+static const char *env_to_str(const char *key, const char *default_value) {
+    const char *env = getenv(key);
+    if (!env || !*env) {
+        return default_value;
+    }
+    return env;
 }
 
 static int clamp_int(int v, int min_v, int max_v) {
@@ -135,6 +144,26 @@ int config_parse_args(struct bridge_config *cfg, int argc, char **argv,
     *if1 = argv[optind + 1];
 
     return 0;
+}
+
+void config_log(const struct bridge_config *cfg) {
+    const char *profile_version = env_to_str("WBRIDGE_PROFILE_VERSION", "1");
+    const char *mode_requested = env_to_str("WBRIDGE_MODE_REQUESTED", "unknown");
+    const char *profile_effective = env_to_str("WBRIDGE_PROFILE_EFFECTIVE", "unknown");
+    const char *thermal_state = env_to_str("WBRIDGE_THERMAL_STATE", "unknown");
+    const char *mode_force = env_to_str("WBRIDGE_MODE_FORCE", "0");
+
+    syslog(LOG_INFO, "Profile: ver=%s requested=%s effective=%s thermal=%s force=%s",
+           profile_version, mode_requested, profile_effective, thermal_state, mode_force);
+    syslog(LOG_INFO, "Config: dispatch_budget=%d, timeout_ms=%d, snaplen=%d",
+           cfg->dispatch_budget, cfg->timeout_ms, cfg->snaplen);
+    syslog(LOG_INFO, "Config: pcap_buffer=%d bytes, rt_priority=%d",
+           cfg->pcap_buffer_bytes, cfg->rt_priority);
+    syslog(LOG_INFO, "Config: affinity=%d, rt=%d, mlock=%d, immediate=%d, promisc=%d",
+           cfg->enable_affinity, cfg->enable_rt, cfg->enable_mlock,
+           cfg->enable_immediate, cfg->enable_promisc);
+    syslog(LOG_INFO, "Config: mac_filter=%d, ip_filter=%d, debug_log=%d",
+           cfg->enable_mac_filter, cfg->enable_ip_filter, cfg->enable_debug_log);
 }
 
 void config_print_usage(FILE *out, const char *prog) {

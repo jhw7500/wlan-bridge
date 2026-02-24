@@ -52,6 +52,12 @@ static struct {
     time_t start_time;
 } stats;
 
+// tpacket 최적화 설정 (환경 변수로 제어)
+static int tpacket_rt_priority = 50;      // 기본값 50
+static int tpacket_retire_tov_ms = 1;     // 기본값 1ms
+static int tpacket_enable_mac_filter = 0; // MAC 필터 사용 플래그
+static int tpacket_enable_ip_filter = 0;  // IP 필터 사용 플래그
+
 static uint8_t iface_mac[2][ETH_ALEN];
 static uint32_t iface_ipv4[2]; // network order, 0 if unset
 static int enable_mac_filter = 0;
@@ -199,7 +205,7 @@ static int setup_rx_ring(struct interface *iface) {
     iface->req.tp_frame_size = FRAME_SIZE;
     iface->req.tp_block_nr = BLOCK_NR;
     iface->req.tp_frame_nr = FRAME_NR;
-    iface->req.tp_retire_blk_tov = RETIRE_TIMEOUT_MS;
+    iface->req.tp_retire_blk_tov = tpacket_retire_tov_ms;  // 환경 변수 값 사용
     iface->req.tp_feature_req_word = TP_FT_REQ_FILL_RXHASH;
 
     // TPACKET_V3 활성화
@@ -231,7 +237,7 @@ static int setup_rx_ring(struct interface *iface) {
     }
 
     fprintf(stderr, "Interface %s: TPACKET_V3 ring setup complete (%zu bytes, %u blocks, retire=%dms)\n",
-            iface->name, iface->ring_size, iface->req.tp_block_nr, RETIRE_TIMEOUT_MS);
+            iface->name, iface->ring_size, iface->req.tp_block_nr, tpacket_retire_tov_ms);
 
     // Promiscuous mode: 브리지 목적이면 반드시 필요(호스트로 향하지 않는 프레임도 수신)
     struct packet_mreq mreq;
@@ -357,11 +363,11 @@ static void *interface_thread(void *arg) {
     }
 
     // RT 스케줄링
-    struct sched_param sp = {.sched_priority = 50};
+    struct sched_param sp = {.sched_priority = tpacket_rt_priority};
     if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp) != 0) {
         fprintf(stderr, "WARNING: pthread_setschedparam(%u) failed: %s\n", idx, strerror(errno));
     } else {
-        fprintf(stderr, "Thread %u set to SCHED_FIFO priority 50\n", idx);
+        fprintf(stderr, "Thread %u set to SCHED_FIFO priority %d\n", idx, tpacket_rt_priority);
     }
 
     fprintf(stderr, "Thread %u: RX from %s, TX to %s\n", idx, rx_iface->name, tx_iface->name);
@@ -520,13 +526,82 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    enable_mac_filter = getenv("DUMB_MAC_FILTER") ? 1 : 0;
-    enable_ip_filter = getenv("DUMB_IP_FILTER") ? 1 : 0;
+    // 환경 변수에서 최적화 모드 설정 읽기
+    const char *env_retire_tov = getenv("WBRIDGE_TPACKET_RETIRE_TOV");
+    const char *env_rt_prio = getenv("WBRIDGE_RT_PRIORITY");
+    const char *env_mac_filter = getenv("WBRIDGE_ENABLE_MAC_FILTER");
+    const char *env_ip_filter = getenv("WBRIDGE_ENABLE_IP_FILTER");
+    const char *env_profile_version = getenv("WBRIDGE_PROFILE_VERSION");
+    const char *env_mode_requested = getenv("WBRIDGE_MODE_REQUESTED");
+    const char *env_profile_effective = getenv("WBRIDGE_PROFILE_EFFECTIVE");
+    const char *env_thermal_state = getenv("WBRIDGE_THERMAL_STATE");
+    const char *env_mode_force = getenv("WBRIDGE_MODE_FORCE");
+
+    if (!env_profile_version || !*env_profile_version) {
+        env_profile_version = "1";
+    }
+    if (!env_mode_requested || !*env_mode_requested) {
+        env_mode_requested = "unknown";
+    }
+    if (!env_profile_effective || !*env_profile_effective) {
+        env_profile_effective = "unknown";
+    }
+    if (!env_thermal_state || !*env_thermal_state) {
+        env_thermal_state = "unknown";
+    }
+    if (!env_mode_force || !*env_mode_force) {
+        env_mode_force = "0";
+    }
+
+    // MAC/IP 필터 (기존 DUMB_* 호환 + 새 WBRIDGE_* 변수)
+    tpacket_enable_mac_filter = (env_mac_filter && atoi(env_mac_filter)) ? 1 : 0;
+    if (!tpacket_enable_mac_filter) {
+        tpacket_enable_mac_filter = getenv("DUMB_MAC_FILTER") ? 1 : 0;
+    }
+    enable_mac_filter = tpacket_enable_mac_filter;
+
+    tpacket_enable_ip_filter = (env_ip_filter && atoi(env_ip_filter)) ? 1 : 0;
+    if (!tpacket_enable_ip_filter) {
+        tpacket_enable_ip_filter = getenv("DUMB_IP_FILTER") ? 1 : 0;
+    }
+    enable_ip_filter = tpacket_enable_ip_filter;
+
+    // RT Priority (기본값 50)
+    tpacket_rt_priority = 50;
+    if (env_rt_prio) {
+        tpacket_rt_priority = atoi(env_rt_prio);
+        if (tpacket_rt_priority < 1) tpacket_rt_priority = 1;
+        if (tpacket_rt_priority > 99) tpacket_rt_priority = 99;
+    }
+
+    // Retire Timeout (기본값 1ms)
+    tpacket_retire_tov_ms = 1;
+    if (env_retire_tov) {
+        tpacket_retire_tov_ms = atoi(env_retire_tov);
+        if (tpacket_retire_tov_ms < 1) tpacket_retire_tov_ms = 1;
+        if (tpacket_retire_tov_ms > 100) tpacket_retire_tov_ms = 100;
+    }
+
     memset(iface_ipv4, 0, sizeof(iface_ipv4));
     memset(iface_mac, 0, sizeof(iface_mac));
 
     // syslog 초기화
     openlog("dumb-tpacket", LOG_PID | LOG_CONS, LOG_LOCAL0);
+
+    syslog(LOG_INFO,
+           "Profile: ver=%s requested=%s effective=%s thermal=%s force=%s",
+           env_profile_version, env_mode_requested, env_profile_effective, env_thermal_state,
+           env_mode_force);
+    syslog(LOG_INFO,
+           "Config: retire_tov=%dms, rt_priority=%d, mac_filter=%d, ip_filter=%d",
+           tpacket_retire_tov_ms, tpacket_rt_priority, tpacket_enable_mac_filter, tpacket_enable_ip_filter);
+    fprintf(stderr,
+            "Profile: ver=%s requested=%s effective=%s thermal=%s force=%s\n",
+            env_profile_version, env_mode_requested, env_profile_effective, env_thermal_state,
+            env_mode_force);
+    fprintf(stderr,
+            "Config: retire_tov=%dms, rt_priority=%d, mac_filter=%d, ip_filter=%d\n",
+            tpacket_retire_tov_ms, tpacket_rt_priority, tpacket_enable_mac_filter, tpacket_enable_ip_filter);
 
     // 시그널 핸들러
     signal(SIGINT, sighandler);

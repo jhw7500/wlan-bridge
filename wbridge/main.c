@@ -52,6 +52,7 @@ int main(int argc, char **argv) {
     openlog(BRIDGE_NAME, LOG_PID | LOG_CONS, LOG_LOCAL0);
     syslog(LOG_INFO, "%s v%s started (%s <-> %s)", BRIDGE_NAME, BRIDGE_VERSION, if0_name, if1_name);
     syslog(LOG_INFO, "Features: %s", BRIDGE_FEATURES);
+    config_log(&ctx->config);
 
     signal(SIGINT, sighandler);
     signal(SIGTERM, sighandler);

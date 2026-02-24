@@ -44,4 +44,11 @@ int config_parse_args(struct bridge_config *cfg, int argc, char **argv,
  */
 void config_print_usage(FILE *out, const char *prog);
 
+/**
+ * Log all configuration values via syslog
+ *
+ * @param cfg Configuration structure to log
+ */
+void config_log(const struct bridge_config *cfg);
+
 #endif // BRIDGE_CONFIG_H
