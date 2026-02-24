@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <signal.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -57,6 +58,7 @@ static int tpacket_rt_priority = 50;      // 기본값 50
 static int tpacket_retire_tov_ms = 1;     // 기본값 1ms
 static int tpacket_enable_mac_filter = 0; // MAC 필터 사용 플래그
 static int tpacket_enable_ip_filter = 0;  // IP 필터 사용 플래그
+static int tpacket_link_guard = 1;
 
 static uint8_t iface_mac[2][ETH_ALEN];
 static uint32_t iface_ipv4[2]; // network order, 0 if unset
@@ -80,6 +82,7 @@ static int enable_ip_filter = 0;
 #define TX_FRAME_SIZE 2048
 #define TX_BLOCK_NR 128                // 8MB (최적화: 4MB → 8MB)
 #define TX_FRAME_NR ((TX_BLOCK_SIZE * TX_BLOCK_NR) / TX_FRAME_SIZE)
+#define DUMB_LINK_CHECK_STRIDE 64
 
 // Interface 구조체
 struct interface {
@@ -154,6 +157,37 @@ static int get_mac(const char *ifname, uint8_t mac[ETH_ALEN]) {
     memcpy(mac, ifr.ifr_hwaddr.sa_data, ETH_ALEN);
     close(fd);
     return 0;
+}
+
+static int read_interface_carrier(const char *ifname) {
+    if (!ifname || !*ifname) {
+        return -1;
+    }
+
+    char path[256];
+    if (snprintf(path, sizeof(path), "/sys/class/net/%s/carrier", ifname) >= (int)sizeof(path)) {
+        return -1;
+    }
+
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        return -1;
+    }
+
+    char buf[8] = {0};
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) {
+        return -1;
+    }
+
+    if (buf[0] == '1') {
+        return 1;
+    }
+    if (buf[0] == '0') {
+        return 0;
+    }
+    return -1;
 }
 
 static int is_local_ipv4(uint32_t ip) {
@@ -410,6 +444,8 @@ static void *interface_thread(void *arg) {
         uint64_t local_error_count = 0;
 
         int tx_flush_needed = 0;
+        unsigned int link_check_skip = 0;
+        int peer_link_up_cached = 1;
         for (unsigned int i = 0; i < num_pkts; i++) {
             // 패킷 데이터
             uint8_t *pkt_data = (uint8_t *)ppd + ppd->tp_mac;
@@ -441,6 +477,23 @@ static void *interface_thread(void *arg) {
             }
 
             // TX (sendto)
+            if (tpacket_link_guard) {
+                if (link_check_skip == 0) {
+                    int carrier = read_interface_carrier(tx_iface->name);
+                    if (carrier >= 0) {
+                        peer_link_up_cached = carrier;
+                    }
+                    link_check_skip = DUMB_LINK_CHECK_STRIDE;
+                } else {
+                    link_check_skip--;
+                }
+
+                if (!peer_link_up_cached) {
+                    local_drop_count++;
+                    goto next_pkt;
+                }
+            }
+
             const struct ethhdr *eh = (const struct ethhdr *)pkt_data;
             int tx_rc = tx_ring_enqueue(idx ^ 1, tx_iface, pkt_data, pkt_len);
             if (tx_rc == 0) {
@@ -531,6 +584,7 @@ int main(int argc, char **argv) {
     const char *env_rt_prio = getenv("WBRIDGE_RT_PRIORITY");
     const char *env_mac_filter = getenv("WBRIDGE_ENABLE_MAC_FILTER");
     const char *env_ip_filter = getenv("WBRIDGE_ENABLE_IP_FILTER");
+    const char *env_link_guard = getenv("WBRIDGE_LINK_GUARD");
     const char *env_profile_version = getenv("WBRIDGE_PROFILE_VERSION");
     const char *env_mode_requested = getenv("WBRIDGE_MODE_REQUESTED");
     const char *env_profile_effective = getenv("WBRIDGE_PROFILE_EFFECTIVE");
@@ -566,6 +620,8 @@ int main(int argc, char **argv) {
     }
     enable_ip_filter = tpacket_enable_ip_filter;
 
+    tpacket_link_guard = (env_link_guard && atoi(env_link_guard)) ? 1 : 0;
+
     // RT Priority (기본값 50)
     tpacket_rt_priority = 50;
     if (env_rt_prio) {
@@ -593,15 +649,17 @@ int main(int argc, char **argv) {
            env_profile_version, env_mode_requested, env_profile_effective, env_thermal_state,
            env_mode_force);
     syslog(LOG_INFO,
-           "Config: retire_tov=%dms, rt_priority=%d, mac_filter=%d, ip_filter=%d",
-           tpacket_retire_tov_ms, tpacket_rt_priority, tpacket_enable_mac_filter, tpacket_enable_ip_filter);
+           "Config: retire_tov=%dms, rt_priority=%d, mac_filter=%d, ip_filter=%d, link_guard=%d",
+           tpacket_retire_tov_ms, tpacket_rt_priority, tpacket_enable_mac_filter, tpacket_enable_ip_filter,
+           tpacket_link_guard);
     fprintf(stderr,
             "Profile: ver=%s requested=%s effective=%s thermal=%s force=%s\n",
             env_profile_version, env_mode_requested, env_profile_effective, env_thermal_state,
             env_mode_force);
     fprintf(stderr,
-            "Config: retire_tov=%dms, rt_priority=%d, mac_filter=%d, ip_filter=%d\n",
-            tpacket_retire_tov_ms, tpacket_rt_priority, tpacket_enable_mac_filter, tpacket_enable_ip_filter);
+            "Config: retire_tov=%dms, rt_priority=%d, mac_filter=%d, ip_filter=%d, link_guard=%d\n",
+            tpacket_retire_tov_ms, tpacket_rt_priority, tpacket_enable_mac_filter, tpacket_enable_ip_filter,
+            tpacket_link_guard);
 
     // 시그널 핸들러
     signal(SIGINT, sighandler);

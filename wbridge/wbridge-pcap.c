@@ -15,6 +15,7 @@
 #include <syslog.h>
 #include <time.h>
 #include <limits.h>
+#include <fcntl.h>
 #include <sys/ioctl.h>
 #include <net/if.h>
 #include <netinet/if_ether.h>
@@ -65,6 +66,7 @@ static struct {
 #define DUMB_MTU 1500
 #define DUMB_SNAPLEN 1600
 #define DUMB_PCAP_BUFFER_SIZE_BYTES (4 * 1024 * 1024)
+#define DUMB_LINK_CHECK_STRIDE 64
 
 struct config {
     int dispatch_budget;
@@ -80,12 +82,14 @@ struct config {
     int enable_mac_filter; // skip reinject when dst is self/peer MAC
     int enable_ip_filter;  // skip reinject when dst IP is local
     int enable_debug_log;  // emit inject/skip logs
+    int enable_link_guard;
 };
 
 static struct {
     pthread_t threads[2];
     pcap_t *rx[2];
     pcap_t *tx[2];
+    char ifname[2][IFNAMSIZ];
     uint8_t mac[2][ETH_ALEN];
     uint32_t ipv4[2]; // network byte order, 0 if not set
     atomic_int ready; // bit0: if0 ready, bit1: if1 ready
@@ -164,6 +168,38 @@ static int get_mac(const char *ifname, uint8_t mac[ETH_ALEN])
     return 0;
 }
 
+static int read_interface_carrier(const char *ifname)
+{
+    if (!ifname || !*ifname) {
+        return -1;
+    }
+
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof(path), "/sys/class/net/%s/carrier", ifname) >= (int)sizeof(path)) {
+        return -1;
+    }
+
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        return -1;
+    }
+
+    char buf[8] = {0};
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) {
+        return -1;
+    }
+
+    if (buf[0] == '1') {
+        return 1;
+    }
+    if (buf[0] == '0') {
+        return 0;
+    }
+    return -1;
+}
+
 static int get_dispatch_budget(void)
 {
     return clamp_int(cfg.dispatch_budget, 1, 4096);
@@ -208,6 +244,7 @@ static void init_config_from_env(void)
     cfg.enable_mac_filter = env_to_int("DUMB_MAC_FILTER", 0) ? 1 : 0; // default off
     cfg.enable_ip_filter = env_to_int("DUMB_IP_FILTER", 0) ? 1 : 0;   // default off
     cfg.enable_debug_log = env_to_int("DUMB_DEBUG", 1) ? 1 : 0;        // default on
+    cfg.enable_link_guard = env_to_int("WBRIDGE_LINK_GUARD", 1) ? 1 : 0;
 
     cfg.dispatch_budget = clamp_int(cfg.dispatch_budget, 1, 4096);
     cfg.rt_priority = clamp_int(cfg.rt_priority, 1, 99);
@@ -454,6 +491,26 @@ forward_packet:
     if (!both_ready() || ifs.tx[peer] == NULL) {
         atomic_fetch_add(&stats.per_thread[i].dropped, 1);
         return; // 아직 준비 전이면 드롭
+    }
+
+    if (cfg.enable_link_guard) {
+        static _Thread_local unsigned int link_check_skip = 0;
+        static _Thread_local int peer_link_up_cached = 1;
+
+        if (link_check_skip == 0) {
+            int carrier = read_interface_carrier(ifs.ifname[peer]);
+            if (carrier >= 0) {
+                peer_link_up_cached = carrier;
+            }
+            link_check_skip = DUMB_LINK_CHECK_STRIDE;
+        } else {
+            link_check_skip--;
+        }
+
+        if (!peer_link_up_cached) {
+            atomic_fetch_add(&stats.per_thread[i].dropped, 1);
+            return;
+        }
     }
 
     // snaplen에 의해 잘린(caplen < len) 패킷은 캡처된 길이만큼만 전달
@@ -716,6 +773,7 @@ int main(int argc, char **argv)
     atomic_init(&ifs.ready, 0);
     memset(ifs.rx, 0, sizeof(ifs.rx));
     memset(ifs.tx, 0, sizeof(ifs.tx));
+    memset(ifs.ifname, 0, sizeof(ifs.ifname));
 
     // Mutex 및 condition variable 초기화
     if (pthread_mutex_init(&ifs.mutex, NULL) != 0) {
@@ -731,6 +789,7 @@ int main(int argc, char **argv)
     // 1) 두 인터페이스를 모두 연다
     for (int i = 0; i < 2; ++i) {
         const char *ifname = (i == 0) ? if0 : if1;
+        strncpy(ifs.ifname[i], ifname, IFNAMSIZ - 1);
         ifs.rx[i] = open_pcap_handle(ifname, 1, errbuf);
         if (!ifs.rx[i]) {
             cleanup();
