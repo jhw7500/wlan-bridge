@@ -83,7 +83,7 @@ case "$PREV_STATE" in
     hot)
         if (( CPU_TEMP >= HOT_CPU_EXIT || WIFI_MAX >= HOT_WIFI_EXIT )); then
             NEW_STATE="hot"
-        elif (( CPU_TEMP >= WARM_CPU_ENTER || WIFI_MAX >= WARM_WIFI_ENTER )); then
+        elif (( CPU_TEMP >= WARM_CPU_EXIT || WIFI_MAX >= WARM_WIFI_EXIT )); then
             NEW_STATE="warm"
         else
             NEW_STATE="ok"

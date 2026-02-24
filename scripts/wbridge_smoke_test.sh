@@ -251,6 +251,24 @@ cleanup() {
 
     systemctl daemon-reload >/dev/null 2>&1 || true
 
+    if [ "${INITIAL_THERMAL_TIMER_ENABLED:-unknown}" = "enabled" ]; then
+        systemctl enable "$THERMAL_TIMER" >/dev/null 2>&1 || true
+    else
+        systemctl disable "$THERMAL_TIMER" >/dev/null 2>&1 || true
+    fi
+
+    if [ "${INITIAL_THERMAL_TIMER_ACTIVE:-unknown}" = "active" ]; then
+        systemctl start "$THERMAL_TIMER" >/dev/null 2>&1 || true
+    else
+        systemctl stop "$THERMAL_TIMER" >/dev/null 2>&1 || true
+    fi
+
+    if [ "${INITIAL_THERMAL_SERVICE_ACTIVE:-unknown}" = "active" ]; then
+        systemctl start "$THERMAL_SERVICE" >/dev/null 2>&1 || true
+    else
+        systemctl stop "$THERMAL_SERVICE" >/dev/null 2>&1 || true
+    fi
+
     if [ "${INITIAL_ACTIVE:-unknown}" = "active" ]; then
         systemctl restart "$SVC" >/dev/null 2>&1 || true
     else
@@ -268,6 +286,9 @@ main() {
 
     cp "$DEFAULT_CFG" "$BACKUP_CFG"
     INITIAL_ACTIVE=$(systemctl is-active "$SVC" 2>/dev/null || true)
+    INITIAL_THERMAL_TIMER_ENABLED=$(systemctl is-enabled "$THERMAL_TIMER" 2>/dev/null || true)
+    INITIAL_THERMAL_TIMER_ACTIVE=$(systemctl is-active "$THERMAL_TIMER" 2>/dev/null || true)
+    INITIAL_THERMAL_SERVICE_ACTIVE=$(systemctl is-active "$THERMAL_SERVICE" 2>/dev/null || true)
     trap cleanup EXIT
 
     log_info "Starting wbridge smoke tests for $SVC"
