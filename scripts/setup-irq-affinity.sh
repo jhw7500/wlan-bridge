@@ -263,23 +263,42 @@ if command -v ethtool &> /dev/null; then
     done
 fi
 
-# ─── eco 모드 전용: cpufreq governor ───
+# ─── cpufreq governor (eco/thermal 전용) ───
 PREV_GOVERNOR="unchanged"
-if [ "$MODE" = "eco" ]; then
-    log_info "[cpufreq] eco 모드: conservative governor 설정"
+if [ "$MODE" = "eco" ] || [ "$MODE" = "thermal" ]; then
     if [ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]; then
         PREV_GOVERNOR=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo "unknown")
-        for cpu_gov in /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_governor; do
-            echo conservative > "$cpu_gov" 2>/dev/null || true
-        done
-        if [ -d /sys/devices/system/cpu/cpufreq/conservative ]; then
-            echo 80 > /sys/devices/system/cpu/cpufreq/conservative/up_threshold 2>/dev/null || true
-            echo 20 > /sys/devices/system/cpu/cpufreq/conservative/down_threshold 2>/dev/null || true
+        if [ "$MODE" = "eco" ]; then
+            TARGET_GOVERNOR="conservative"
+            for cpu_gov in /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_governor; do
+                echo conservative > "$cpu_gov" 2>/dev/null || true
+            done
+            if [ -d /sys/devices/system/cpu/cpufreq/conservative ]; then
+                echo 80 > /sys/devices/system/cpu/cpufreq/conservative/up_threshold 2>/dev/null || true
+                echo 20 > /sys/devices/system/cpu/cpufreq/conservative/down_threshold 2>/dev/null || true
+            fi
+            log_info "[cpufreq] eco: $PREV_GOVERNOR → conservative (up=80, down=20)"
+        else
+            TARGET_GOVERNOR="powersave"
+            for cpu_gov in /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_governor; do
+                echo powersave > "$cpu_gov" 2>/dev/null || true
+            done
+            log_info "[cpufreq] thermal: $PREV_GOVERNOR → powersave"
         fi
-        log_info "  cpufreq: $PREV_GOVERNOR → conservative (up=80, down=20)"
     else
-        log_warn "  cpufreq: scaling_governor 미지원"
+        log_warn "[cpufreq] scaling_governor 미지원"
     fi
+fi
+
+# ─── cpuidle deep state 활성화 (thermal 전용) ───
+if [ "$MODE" = "thermal" ]; then
+    log_info "[cpuidle] thermal: deep idle state 활성화"
+    for state in /sys/devices/system/cpu/cpu[0-9]*/cpuidle/state*/disable; do
+        if [ -f "$state" ]; then
+            echo 0 > "$state" 2>/dev/null || true
+        fi
+    done
+    log_info "  모든 cpuidle state 활성화 완료"
 fi
 
 # ─── 6. wbridge 환경변수 파일 생성 ───
@@ -303,7 +322,7 @@ WBRIDGE_RT_PRIORITY=$WB_RT_PRIORITY
 WBRIDGE_PCAP_BUFFER=$WB_PCAP_BUFFER
 # wbridge-tpacket용
 WBRIDGE_TPACKET_RETIRE_TOV=$WB_TPACKET_RETIRE_TOV
-# cpufreq (eco 모드 전용)
+# cpufreq (eco: conservative, thermal: powersave)
 WBRIDGE_CPUFREQ_PREV_GOVERNOR=$PREV_GOVERNOR
 EOF
 
