@@ -46,4 +46,5 @@ jobs:
       id-token: write
       actions: read
     uses: jhw7500/automation/.github/workflows/gemini-chat.yml@v1.23
-    secrets: inherit
+    secrets:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}

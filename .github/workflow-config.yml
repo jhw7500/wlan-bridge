@@ -31,10 +31,12 @@ workflows:
   # Shared automation workflow wrappers
   auto-rereview-request:
     enabled: false
+  # NOTE: review.auto=false이므로 자동 PR 리뷰 워크플로우는 비활성화.
+  # 자동 리뷰를 사용하려면 review.auto=true로 변경하고 아래 워크플로우도 enabled: true로 설정.
   claude-code-review:
-    enabled: true
+    enabled: false
   gemini-auto-review:
-    enabled: true
+    enabled: false
   gemini-dispatch:
     enabled: true
   gemini-invoke:
@@ -49,7 +51,7 @@ workflows:
   opencode:
     enabled: true
   opencode-auto-review:
-    enabled: true
+    enabled: false
   gemini-chat:
     enabled: true
   claude:

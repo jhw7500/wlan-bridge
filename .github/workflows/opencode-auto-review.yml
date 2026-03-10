@@ -32,4 +32,5 @@ jobs:
       pull-requests: write
       id-token: write
     uses: jhw7500/automation/.github/workflows/opencode-auto-review.yml@v1.23
-    secrets: inherit
+    secrets:
+      OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}

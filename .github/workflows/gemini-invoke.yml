@@ -43,4 +43,5 @@ jobs:
       event_name: ${{ inputs.event_name }}
       is_pull_request: ${{ inputs.is_pull_request }}
       additional_context: ${{ inputs.additional_context }}
-    secrets: inherit
+    secrets:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}

@@ -33,4 +33,5 @@ jobs:
       issue_title: ${{ inputs.issue_title }}
       issue_body: ${{ inputs.issue_body }}
       additional_context: ${{ inputs.additional_context }}
-    secrets: inherit
+    secrets:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}

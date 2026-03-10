@@ -30,4 +30,5 @@ jobs:
       id-token: write
       issues: write
       pull-requests: write
-    secrets: inherit
+    secrets:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}

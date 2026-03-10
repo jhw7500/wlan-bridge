@@ -32,4 +32,5 @@ jobs:
       pull-requests: write
       id-token: write
     uses: jhw7500/automation/.github/workflows/claude-code-review.yml@v1.23
-    secrets: inherit
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

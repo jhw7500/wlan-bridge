@@ -1,20 +1,7 @@
 name: Gemini Scheduled Issue Triage
 
 on:
-  schedule:
-    - cron: '0 * * * *'
-  push:
-    branches:
-      - main
-      - 'release/**/*'
-    paths:
-      - '.github/workflows/gemini-scheduled-triage.yml'
-  pull_request:
-    branches:
-      - main
-      - 'release/**/*'
-    paths:
-      - '.github/workflows/gemini-scheduled-triage.yml'
+  # 자동 스케줄 비활성화. 수동 실행만 가능.
   workflow_dispatch:
 
 jobs:
@@ -46,4 +33,5 @@ jobs:
       issues: write
       pull-requests: write
     uses: jhw7500/automation/.github/workflows/gemini-scheduled-triage.yml@v1.23
-    secrets: inherit
+    secrets:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
