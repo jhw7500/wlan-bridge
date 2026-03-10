@@ -43,6 +43,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "MODE:"
             echo "  latency  - 레이턴시 최소화 (인터럽트 즉시 처리, GRO OFF)"
+            echo "  eco      - 저전력 모드 (온도 저감 + 레이턴시 유지)"
             echo "  thermal  - 발열 최소화 (인터럽트 병합, GRO ON)"
             echo "  normal   - 균형 모드 (기본값)"
             echo ""
@@ -79,9 +80,9 @@ fi
 
 # 모드 검증
 case "$MODE" in
-    latency|thermal|normal) ;;
+    latency|thermal|normal|eco) ;;
     *)
-        log_err "ERROR: 알 수 없는 모드 '$MODE' (latency|thermal|normal)"
+        log_err "ERROR: 알 수 없는 모드 '$MODE' (latency|normal|eco|thermal)"
         exit 1
         ;;
 esac
@@ -90,7 +91,7 @@ MODE_REQUESTED="${WBRIDGE_MODE_REQUESTED:-$MODE}"
 PROFILE_EFFECTIVE="$MODE"
 
 case "$MODE_REQUESTED" in
-    latency|thermal|normal) ;;
+    latency|thermal|normal|eco) ;;
     *)
         log_warn "WARNING: 알 수 없는 요청 모드 '$MODE_REQUESTED', effective 모드($MODE)로 대체"
         MODE_REQUESTED="$MODE"
@@ -140,6 +141,19 @@ case "$MODE" in
         WB_PCAP_BUFFER=8388608
         # wbridge-tpacket 환경변수 (발열 최적화)
         WB_TPACKET_RETIRE_TOV=10
+        ;;
+    eco)
+        MODE_DESC="저전력 (온도 저감)"
+        RX_USECS=100; TX_USECS=100; RX_FRAMES=6
+        GRO=on;       GSO=off;      TSO=off
+        # wbridge-pcap 환경변수
+        WB_DISPATCH_BUDGET=96
+        WB_IMMEDIATE=0
+        WB_TIMEOUT_MS=5
+        WB_RT_PRIORITY=40
+        WB_PCAP_BUFFER=4194304
+        # wbridge-tpacket 환경변수
+        WB_TPACKET_RETIRE_TOV=5
         ;;
     normal)
         MODE_DESC="균형 (일반)"
@@ -249,6 +263,25 @@ if command -v ethtool &> /dev/null; then
     done
 fi
 
+# ─── eco 모드 전용: cpufreq governor ───
+PREV_GOVERNOR="unchanged"
+if [ "$MODE" = "eco" ]; then
+    log_info "[cpufreq] eco 모드: conservative governor 설정"
+    if [ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]; then
+        PREV_GOVERNOR=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo "unknown")
+        for cpu_gov in /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_governor; do
+            echo conservative > "$cpu_gov" 2>/dev/null || true
+        done
+        if [ -d /sys/devices/system/cpu/cpufreq/conservative ]; then
+            echo 80 > /sys/devices/system/cpu/cpufreq/conservative/up_threshold 2>/dev/null || true
+            echo 20 > /sys/devices/system/cpu/cpufreq/conservative/down_threshold 2>/dev/null || true
+        fi
+        log_info "  cpufreq: $PREV_GOVERNOR → conservative (up=80, down=20)"
+    else
+        log_warn "  cpufreq: scaling_governor 미지원"
+    fi
+fi
+
 # ─── 6. wbridge 환경변수 파일 생성 ───
 log_info "[ENV] wbridge 환경변수 → $ENV_FILE"
 
@@ -270,6 +303,8 @@ WBRIDGE_RT_PRIORITY=$WB_RT_PRIORITY
 WBRIDGE_PCAP_BUFFER=$WB_PCAP_BUFFER
 # wbridge-tpacket용
 WBRIDGE_TPACKET_RETIRE_TOV=$WB_TPACKET_RETIRE_TOV
+# cpufreq (eco 모드 전용)
+WBRIDGE_CPUFREQ_PREV_GOVERNOR=$PREV_GOVERNOR
 EOF
 
 log_info "  WBRIDGE_PROFILE_VERSION=$PROFILE_VERSION"

@@ -184,6 +184,38 @@ run_thermal_clamp_case() {
     expect_equal "thermal clamp udp optimization skipped" "$udp_result" "skipped_thermal"
 }
 
+run_eco_case() {
+    log_info "Running case: eco_mode"
+    set_kv WBRIDGE_ENGINE pcap
+    set_kv WBRIDGE_OPTIMIZE 1
+    set_kv WBRIDGE_MODE eco
+    set_kv WBRIDGE_THERMAL_STATE ok
+    set_kv WBRIDGE_MODE_FORCE 0
+
+    service_restart || return
+
+    local effective
+    effective=$(json_get /run/wbridge.effective.json profile_effective)
+
+    expect_equal "eco mode effective" "$effective" "eco"
+}
+
+run_eco_thermal_clamp_case() {
+    log_info "Running case: eco_thermal_clamp"
+    set_kv WBRIDGE_ENGINE pcap
+    set_kv WBRIDGE_OPTIMIZE 1
+    set_kv WBRIDGE_MODE eco
+    set_kv WBRIDGE_THERMAL_STATE hot
+    set_kv WBRIDGE_MODE_FORCE 0
+
+    service_restart || return
+
+    local effective
+    effective=$(json_get /run/wbridge.effective.json profile_effective)
+
+    expect_equal "eco thermal clamp to thermal" "$effective" "thermal"
+}
+
 run_force_override_case() {
     log_info "Running case: force_override"
     set_kv WBRIDGE_ENGINE pcap
@@ -296,6 +328,8 @@ main() {
     run_pcap_case
     run_tpacket_case
     run_thermal_clamp_case
+    run_eco_case
+    run_eco_thermal_clamp_case
     run_force_override_case
     run_thermal_timer_case
     run_sysctl_case

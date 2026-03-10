@@ -72,7 +72,18 @@ for irq_path in /proc/irq/*/smp_affinity; do
 done
 echo "  ✓ 인터럽트 처리 코어 제한 해제 완료"
 
-# 5. 영구 설정 안내
+# 5. cpufreq Governor 원복 (eco 모드에서 변경된 경우)
+echo ""
+echo -e "${BLUE}5. cpufreq Governor 원복 (→ performance)${NC}"
+for cpu_gov in /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_governor; do
+    if [ -f "$cpu_gov" ]; then
+        echo performance > "$cpu_gov" 2>/dev/null || true
+    fi
+done
+CURRENT_GOV=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo "N/A")
+echo "  ✓ cpufreq governor: $CURRENT_GOV"
+
+# 6. 영구 설정 안내
 echo ""
 echo -e "${YELLOW}주의: /etc/sysctl.conf 또는 /etc/rc.local에 직접 추가한 설정은${NC}"
 echo -e "${YELLOW}이 스크립트로 삭제되지 않습니다. 해당 파일들을 확인하여 수동으로 정리하세요.${NC}"
