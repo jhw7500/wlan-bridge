@@ -1,52 +1,10 @@
-.DS_Store
-Thumbs.db
-
-# Node
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-
-# Env (keep example)
-.env
-.env.local
-.env.*.local
-
-# Python / venv
-.venv/
-venv/
-__pycache__/
-*.pyc
-
-# Local machine state
-.home/
-
-# Build artifacts
-dist/
-build/
-out/
-coverage/
-
-# C build outputs
-*.o
-*.a
-*.so
 wbridge/debug/
 wbridge/release/
+wbridge/.serena/
 
 # Keep session notes, ignore other logs/tmp outputs
 logs/*
 !logs/session-notes.md
-tmp/
-
-# Nested repos / large vendor drops
-projects/wlan-package/
-
-.gemini/
-
-gha-creds-*.json
-
 tmp/
 
 
