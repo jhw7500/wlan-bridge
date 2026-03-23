@@ -13,11 +13,13 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <limits.h>
 #include <syslog.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
 #include <ifaddrs.h>
 #include <arpa/inet.h>
+#include <dirent.h>
 
 // Global pointer for the packet handler callback
 struct bridge_context *g_bridge_context = NULL;
@@ -46,6 +48,77 @@ static int get_mac(const char *ifname, uint8_t mac[ETH_ALEN]) {
     return 0;
 }
 
+#define NETWORKD_DIR "/etc/systemd/network"
+
+/**
+ * systemd networkd .network 파일에서 인터페이스의 IPv4 주소를 읽는다.
+ * /etc/systemd/network/*.network 파일을 스캔하여
+ * [Match] Name=<ifname> 에 매칭되는 파일의 [Network] Address=x.x.x.x/yy 를 파싱.
+ *
+ * @return network byte order IPv4 주소, 실패 시 0
+ */
+static uint32_t networkd_get_ipv4(const char *ifname) {
+    DIR *dir = opendir(NETWORKD_DIR);
+    if (!dir) return 0;
+
+    uint32_t result = 0;
+    struct dirent *ent;
+
+    while ((ent = readdir(dir)) != NULL) {
+        const char *name = ent->d_name;
+        size_t len = strlen(name);
+        if (len < 9 || strcmp(name + len - 8, ".network") != 0)
+            continue;
+
+        char path[PATH_MAX];
+        snprintf(path, sizeof(path), "%s/%s", NETWORKD_DIR, name);
+
+        FILE *fp = fopen(path, "r");
+        if (!fp) continue;
+
+        char line[256];
+        int name_matched = 0;
+        int in_match = 0, in_network = 0;
+
+        while (fgets(line, sizeof(line), fp)) {
+            // strip newline
+            char *nl = strchr(line, '\n');
+            if (nl) *nl = '\0';
+
+            // section header
+            if (line[0] == '[') {
+                in_match = (strncmp(line, "[Match]", 7) == 0);
+                in_network = (strncmp(line, "[Network]", 9) == 0);
+                continue;
+            }
+
+            if (in_match && strncmp(line, "Name=", 5) == 0) {
+                if (strcmp(line + 5, ifname) == 0)
+                    name_matched = 1;
+            }
+
+            if (in_network && name_matched && strncmp(line, "Address=", 8) == 0) {
+                // "192.168.0.100/24" → "192.168.0.100"
+                char ip_buf[INET_ADDRSTRLEN];
+                strncpy(ip_buf, line + 8, sizeof(ip_buf) - 1);
+                ip_buf[sizeof(ip_buf) - 1] = '\0';
+                char *slash = strchr(ip_buf, '/');
+                if (slash) *slash = '\0';
+
+                struct in_addr addr;
+                if (inet_pton(AF_INET, ip_buf, &addr) == 1) {
+                    result = addr.s_addr;
+                }
+                break;
+            }
+        }
+        fclose(fp);
+        if (result != 0) break;
+    }
+    closedir(dir);
+    return result;
+}
+
 static pcap_t *open_pcap_handle(const char *ifname, int is_rx, const struct bridge_config *cfg, char errbuf[PCAP_ERRBUF_SIZE]) {
     pcap_t *h = pcap_create(ifname, errbuf);
     if (!h) return NULL;
@@ -71,8 +144,6 @@ static pcap_t *open_pcap_handle(const char *ifname, int is_rx, const struct brid
 }
 
 static int both_ready(struct bridge_context *ctx) {
-    int r = atomic_load_explicit(&ctx->interfaces->ready, memory_order_acquire);
-    // Actually we need to check ready flag of both interfaces
     int r0 = atomic_load(&ctx->interfaces[0].ready);
     int r1 = atomic_load(&ctx->interfaces[1].ready);
     return r0 && r1;
@@ -110,10 +181,27 @@ static void *bridge_thread_func(void *arg) {
 
     syslog(LOG_INFO, "Interface %s (if%d) worker thread started", iface->name, i);
 
+    bridge_interface_t peer = bridge_peer(i);
+    struct dispatch_counters *lc = &ctx->local_counters[i];
+
     int stats_counter = 0;
     while (atomic_load(&ctx->keep_running)) {
+        // Reset local counters before dispatch
+        memset(lc, 0, sizeof(*lc));
+
         int rc = pcap_dispatch(iface->rx_handle, ctx->config.dispatch_budget,
                                bridge_packet_handler, (unsigned char *)((uintptr_t)i));
+
+        // Flush local counters to atomic stats (batch update)
+        if (lc->rx_packets)
+            atomic_fetch_add(&ctx->stats.iface[i].rx_packets, lc->rx_packets);
+        if (lc->tx_packets)
+            atomic_fetch_add(&ctx->stats.iface[peer].tx_packets, lc->tx_packets);
+        if (lc->dropped)
+            atomic_fetch_add(&ctx->stats.iface[i].dropped, lc->dropped);
+        if (lc->errors)
+            atomic_fetch_add(&ctx->stats.iface[i].errors, lc->errors);
+
         if (rc == PCAP_ERROR) {
             atomic_store(&ctx->keep_running, 0);
             break;
@@ -162,6 +250,7 @@ int bridge_init(struct bridge_context *ctx, const char *if0, const char *if1) {
     }
 
     // IP address collection (best effort)
+    // 1차: 인터페이스에서 직접 읽기, 2차: systemd networkd 설정 파일 fallback
     if (ctx->config.enable_ip_filter) {
         struct ifaddrs *ifa = NULL;
         if (getifaddrs(&ifa) == 0) {
@@ -174,6 +263,21 @@ int bridge_init(struct bridge_context *ctx, const char *if0, const char *if1) {
                 }
             }
             freeifaddrs(ifa);
+        }
+
+        for (int i = 0; i < 2; i++) {
+            const char *src;
+            if (ctx->interfaces[i].ipv4 != 0) {
+                src = "interface";
+            } else {
+                ctx->interfaces[i].ipv4 = networkd_get_ipv4(names[i]);
+                src = "networkd";
+            }
+            if (ctx->interfaces[i].ipv4 != 0) {
+                char ip_str[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &ctx->interfaces[i].ipv4, ip_str, sizeof(ip_str));
+                syslog(LOG_INFO, "ip-filter: %s = %s (from %s)", names[i], ip_str, src);
+            }
         }
     }
 

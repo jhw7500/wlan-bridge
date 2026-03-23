@@ -93,6 +93,14 @@ struct bridge_stats {
     time_t start_time;
 };
 
+// Per-thread local counters (non-atomic, for batch update after pcap_dispatch)
+struct dispatch_counters {
+    unsigned long rx_packets;
+    unsigned long tx_packets;
+    unsigned long dropped;
+    unsigned long errors;
+};
+
 // Per-interface state
 struct bridge_interface {
     char name[IFNAMSIZ];
@@ -116,6 +124,7 @@ struct bridge_context {
     struct bridge_stats stats;
     struct bridge_interface interfaces[BRIDGE_IF_COUNT];
     struct packet_filter filter;
+    struct dispatch_counters local_counters[BRIDGE_IF_COUNT];
     atomic_int keep_running;
     pthread_mutex_t mutex;
     pthread_cond_t cond;

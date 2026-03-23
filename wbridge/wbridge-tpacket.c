@@ -27,6 +27,8 @@
 #include <sys/socket.h>
 #include <poll.h>
 #include <ifaddrs.h>
+#include <dirent.h>
+#include <limits.h>
 
 // Graceful shutdown flag (atomic for proper memory ordering)
 static atomic_int keep_running = ATOMIC_VAR_INIT(1);
@@ -44,7 +46,8 @@ struct thread_stats {
     atomic_ulong dropped;
     atomic_ulong ring_full;
     atomic_ulong errors;
-    char padding[BRIDGE_CACHE_LINE_SIZE - (5 * sizeof(atomic_ulong))];
+    atomic_ulong send_err_count;
+    char padding[BRIDGE_CACHE_LINE_SIZE - (6 * sizeof(atomic_ulong))];
 } __attribute__((aligned(BRIDGE_CACHE_LINE_SIZE)));
 
 // Packet statistics (cache-line aligned)
@@ -159,35 +162,76 @@ static int get_mac(const char *ifname, uint8_t mac[ETH_ALEN]) {
     return 0;
 }
 
-static int read_interface_carrier(const char *ifname) {
-    if (!ifname || !*ifname) {
-        return -1;
-    }
+static int read_interface_carrier(int sock_fd, const char *ifname) {
+    struct ifreq ifr;
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
 
-    char path[256];
-    if (snprintf(path, sizeof(path), "/sys/class/net/%s/carrier", ifname) >= (int)sizeof(path)) {
+    if (ioctl(sock_fd, SIOCGIFFLAGS, &ifr) < 0)
         return -1;
-    }
 
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) {
-        return -1;
-    }
+    return (ifr.ifr_flags & IFF_RUNNING) ? 1 : 0;
+}
 
-    char buf[8] = {0};
-    ssize_t n = read(fd, buf, sizeof(buf) - 1);
-    close(fd);
-    if (n <= 0) {
-        return -1;
-    }
+#define NETWORKD_DIR "/etc/systemd/network"
 
-    if (buf[0] == '1') {
-        return 1;
+static uint32_t networkd_get_ipv4(const char *ifname) {
+    DIR *dir = opendir(NETWORKD_DIR);
+    if (!dir) return 0;
+
+    uint32_t result = 0;
+    struct dirent *ent;
+
+    while ((ent = readdir(dir)) != NULL) {
+        const char *name = ent->d_name;
+        size_t len = strlen(name);
+        if (len < 9 || strcmp(name + len - 8, ".network") != 0)
+            continue;
+
+        char path[PATH_MAX];
+        snprintf(path, sizeof(path), "%s/%s", NETWORKD_DIR, name);
+
+        FILE *fp = fopen(path, "r");
+        if (!fp) continue;
+
+        char line[256];
+        int name_matched = 0;
+        int in_match = 0, in_network = 0;
+
+        while (fgets(line, sizeof(line), fp)) {
+            char *nl = strchr(line, '\n');
+            if (nl) *nl = '\0';
+
+            if (line[0] == '[') {
+                in_match = (strncmp(line, "[Match]", 7) == 0);
+                in_network = (strncmp(line, "[Network]", 9) == 0);
+                continue;
+            }
+
+            if (in_match && strncmp(line, "Name=", 5) == 0) {
+                if (strcmp(line + 5, ifname) == 0)
+                    name_matched = 1;
+            }
+
+            if (in_network && name_matched && strncmp(line, "Address=", 8) == 0) {
+                char ip_buf[INET_ADDRSTRLEN];
+                strncpy(ip_buf, line + 8, sizeof(ip_buf) - 1);
+                ip_buf[sizeof(ip_buf) - 1] = '\0';
+                char *slash = strchr(ip_buf, '/');
+                if (slash) *slash = '\0';
+
+                struct in_addr addr;
+                if (inet_pton(AF_INET, ip_buf, &addr) == 1) {
+                    result = addr.s_addr;
+                }
+                break;
+            }
+        }
+        fclose(fp);
+        if (result != 0) break;
     }
-    if (buf[0] == '0') {
-        return 0;
-    }
-    return -1;
+    closedir(dir);
+    return result;
 }
 
 static int is_local_ipv4(uint32_t ip) {
@@ -414,8 +458,8 @@ static void *interface_thread(void *arg) {
     pfd.revents = 0;
 
     while (atomic_load(&keep_running)) {
-        // Block이 준비될 때까지 poll (timeout은 retire timeout보다 조금 크게)
-        int ret = poll(&pfd, 1, 10);
+        // Block이 준비될 때까지 poll (retire timeout의 3배)
+        int ret = poll(&pfd, 1, tpacket_retire_tov_ms * 3);
         if (ret < 0) {
             if (errno == EINTR) continue;
             fprintf(stderr, "ERROR: poll() failed: %s\n", strerror(errno));
@@ -479,7 +523,7 @@ static void *interface_thread(void *arg) {
             // TX (sendto)
             if (tpacket_link_guard) {
                 if (link_check_skip == 0) {
-                    int carrier = read_interface_carrier(tx_iface->name);
+                    int carrier = read_interface_carrier(tx_iface->sock_tx, tx_iface->name);
                     if (carrier >= 0) {
                         peer_link_up_cached = carrier;
                     }
@@ -515,8 +559,7 @@ static void *interface_thread(void *arg) {
                     local_drop_count++;
                     local_error_count++;
 
-                    static atomic_ulong send_err_count[2];
-                    unsigned long err_cnt = atomic_fetch_add(&send_err_count[idx], 1) + 1;
+                    unsigned long err_cnt = atomic_fetch_add(&stats.per_thread[idx].send_err_count, 1) + 1;
                     if (err_cnt == 1 || (err_cnt % 1000) == 0) {
                         fprintf(stderr,
                                 "sendto(%s->%s) failed (count=%lu): %s\n",
@@ -662,9 +705,13 @@ int main(int argc, char **argv) {
             tpacket_link_guard);
 
     // 시그널 핸들러
-    signal(SIGINT, sighandler);
-    signal(SIGTERM, sighandler);
-    signal(SIGUSR1, sigusr1_handler);
+    struct sigaction sa_term = {.sa_handler = sighandler, .sa_flags = SA_RESTART};
+    struct sigaction sa_usr1 = {.sa_handler = sigusr1_handler, .sa_flags = SA_RESTART};
+    sigemptyset(&sa_term.sa_mask);
+    sigemptyset(&sa_usr1.sa_mask);
+    sigaction(SIGINT, &sa_term, NULL);
+    sigaction(SIGTERM, &sa_term, NULL);
+    sigaction(SIGUSR1, &sa_usr1, NULL);
 
     // 통계 초기화
     memset(&stats, 0, sizeof(stats));
@@ -708,7 +755,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    // IPv4 수집 (필요 시)
+    // IPv4 수집: 1차 인터페이스, 2차 networkd fallback
     if (enable_ip_filter) {
         struct ifaddrs *ifa = NULL;
         if (getifaddrs(&ifa) == 0) {
@@ -722,8 +769,21 @@ int main(int argc, char **argv) {
                 }
             }
             freeifaddrs(ifa);
-        } else {
-            fprintf(stderr, "WARN: getifaddrs failed: %s (ip-filter may be ineffective)\n", strerror(errno));
+        }
+
+        for (int i = 0; i < 2; i++) {
+            const char *src;
+            if (iface_ipv4[i] != 0) {
+                src = "interface";
+            } else {
+                iface_ipv4[i] = networkd_get_ipv4(interfaces[i].name);
+                src = "networkd";
+            }
+            if (iface_ipv4[i] != 0) {
+                char ip_str[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &iface_ipv4[i], ip_str, sizeof(ip_str));
+                syslog(LOG_INFO, "ip-filter: %s = %s (from %s)", interfaces[i].name, ip_str, src);
+            }
         }
     }
 

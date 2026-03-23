@@ -54,9 +54,13 @@ int main(int argc, char **argv) {
     syslog(LOG_INFO, "Features: %s", BRIDGE_FEATURES);
     config_log(&ctx->config);
 
-    signal(SIGINT, sighandler);
-    signal(SIGTERM, sighandler);
-    signal(SIGUSR1, sigusr1_handler);
+    struct sigaction sa_term = {.sa_handler = sighandler, .sa_flags = SA_RESTART};
+    struct sigaction sa_usr1 = {.sa_handler = sigusr1_handler, .sa_flags = SA_RESTART};
+    sigemptyset(&sa_term.sa_mask);
+    sigemptyset(&sa_usr1.sa_mask);
+    sigaction(SIGINT, &sa_term, NULL);
+    sigaction(SIGTERM, &sa_term, NULL);
+    sigaction(SIGUSR1, &sa_usr1, NULL);
 
     if (bridge_init(ctx, if0_name, if1_name) != 0) {
         fprintf(stderr, "FATAL: Bridge initialization failed\n");

@@ -53,16 +53,17 @@ void bridge_packet_handler(unsigned char *user_data,
 
     struct bridge_context *ctx = g_bridge_context;
     bridge_interface_t peer_idx = bridge_peer(iface_idx);
+    struct dispatch_counters *lc = &ctx->local_counters[iface_idx];
+
+    // Update RX statistics (local counter, flushed after pcap_dispatch)
+    lc->rx_packets++;
 
     // Parse packet into structured format
     struct packet_info pkt;
     if (packet_parse(hdr, data, &pkt) < 0) {
-        atomic_fetch_add(&ctx->stats.iface[iface_idx].errors, 1);
+        lc->errors++;
         return; // Invalid packet
     }
-
-    // Update RX statistics
-    atomic_fetch_add(&ctx->stats.iface[iface_idx].rx_packets, 1);
 
     // Check if packet should be filtered
     if (filter_should_drop(&ctx->filter, &pkt, iface_idx)) {
@@ -71,10 +72,10 @@ void bridge_packet_handler(unsigned char *user_data,
 
     // Forward packet to peer interface
     if (bridge_packet_forward(ctx, &pkt, peer_idx) < 0) {
-        atomic_fetch_add(&ctx->stats.iface[iface_idx].dropped, 1);
-        atomic_fetch_add(&ctx->stats.iface[peer_idx].errors, 1);
+        lc->dropped++;
+        lc->errors++;
     } else {
-        atomic_fetch_add(&ctx->stats.iface[peer_idx].tx_packets, 1);
+        lc->tx_packets++;
     }
 }
 
@@ -136,18 +137,19 @@ void bridge_log_inject_error(struct bridge_context *ctx,
     }
 
     static atomic_ulong error_count = 0;
-    static time_t last_log_time = 0;
+    static atomic_long last_log_time = 0;
 
     unsigned long count = atomic_fetch_add(&error_count, 1) + 1;
-    time_t now = time(NULL);
+    long now = (long)time(NULL);
 
     // Log first error immediately, then at most once per second
-    if (count == 1 || (last_log_time > 0 && now > last_log_time)) {
+    long prev = atomic_load(&last_log_time);
+    if (count == 1 || (prev > 0 && now > prev)) {
         struct bridge_interface *iface = &ctx->interfaces[iface_idx];
         const char *err = pcap_geterr(iface->tx_handle);
         syslog(LOG_ERR, "pcap_inject failed on if%d (%s): %s (errors: %lu)",
                iface_idx, iface->name, err ? err : "unknown", count);
-        last_log_time = now;
+        atomic_store(&last_log_time, now);
     }
 }
 
@@ -164,14 +166,15 @@ void bridge_log_partial_inject(struct bridge_context *ctx,
     }
 
     static atomic_ulong partial_count = 0;
-    static time_t last_log_time = 0;
+    static atomic_long last_log_time = 0;
 
     unsigned long count = atomic_fetch_add(&partial_count, 1) + 1;
-    time_t now = time(NULL);
+    long now = (long)time(NULL);
 
-    if (count == 1 || (last_log_time > 0 && now > last_log_time)) {
+    long prev = atomic_load(&last_log_time);
+    if (count == 1 || (prev > 0 && now > prev)) {
         syslog(LOG_ERR, "Partial inject on if%d: %d/%u bytes (count: %lu)",
                iface_idx, injected, expected, count);
-        last_log_time = now;
+        atomic_store(&last_log_time, now);
     }
 }
