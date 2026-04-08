@@ -180,44 +180,85 @@ if [ $CPU_COUNT -lt 2 ]; then
     log_warn "WARNING: 코어 2개 미만, 효과 제한적"
 fi
 
+# ─── IRQ Affinity 정책 결정 ───
+# auto: 코어 수에 따라 자동 결정, pinned: 명시적 CPU 핀, none: 커널 기본
+IRQ_AFFINITY="${WBRIDGE_IRQ_AFFINITY:-auto}"
+case "$IRQ_AFFINITY" in
+    auto|pinned|none) ;;
+    *)
+        log_warn "WARNING: 알 수 없는 IRQ affinity '$IRQ_AFFINITY', auto로 대체"
+        IRQ_AFFINITY="auto"
+        ;;
+esac
+
+if [ "$IRQ_AFFINITY" = "auto" ]; then
+    if [ $CPU_COUNT -ge 2 ]; then
+        IRQ_AFFINITY="pinned"
+    else
+        IRQ_AFFINITY="none"
+    fi
+    log_info "IRQ affinity auto → $IRQ_AFFINITY (${CPU_COUNT}코어)"
+fi
+
+# ─── IRQ Affinity CPU 매핑 결정 ───
+# 4코어+: ETH→CPU2, WLAN→CPU3 (IRQ 전용 코어 분리)
+# 2-3코어: ETH→CPU0, WLAN→CPU1 (브릿지 스레드와 같은 코어 공유, 캐시 히트)
+if [ "$IRQ_AFFINITY" = "pinned" ]; then
+    if [ $CPU_COUNT -ge 4 ]; then
+        ETH_AFFINITY_HEX=4;  ETH_AFFINITY_CPU=2
+        WLAN_AFFINITY_HEX=8; WLAN_AFFINITY_CPU=3
+    else
+        ETH_AFFINITY_HEX=1;  ETH_AFFINITY_CPU=0
+        WLAN_AFFINITY_HEX=2; WLAN_AFFINITY_CPU=1
+    fi
+fi
+
 # ─── IRQ 찾기 ───
 find_irq() {
     local iface=$1
     cat /proc/interrupts | grep -i "$iface" | awk '{print $1}' | tr -d ':' | head -1
 }
 
-# ─── 1. IRQ Affinity (공통) ───
-log_info "[1/5] IRQ Affinity"
+# ─── 1. IRQ Affinity ───
+log_info "[1/5] IRQ Affinity [policy=$IRQ_AFFINITY]"
 
-ETH_IRQ=$(find_irq "$ETH_IF")
-if [ -n "$ETH_IRQ" ] && [ $CPU_COUNT -gt 2 ]; then
-    echo 4 > /proc/irq/$ETH_IRQ/smp_affinity 2>/dev/null && \
-        log_info "  $ETH_IF (IRQ $ETH_IRQ) → CPU 2" || \
-        log_warn "  $ETH_IF affinity 설정 실패"
+if [ "$IRQ_AFFINITY" = "pinned" ]; then
+    ETH_IRQ=$(find_irq "$ETH_IF")
+    if [ -n "$ETH_IRQ" ]; then
+        echo $ETH_AFFINITY_HEX > /proc/irq/$ETH_IRQ/smp_affinity 2>/dev/null && \
+            log_info "  $ETH_IF (IRQ $ETH_IRQ) → CPU $ETH_AFFINITY_CPU" || \
+            log_warn "  $ETH_IF affinity 설정 실패"
+    else
+        log_warn "  $ETH_IF: IRQ 미발견"
+    fi
+
+    WLAN_IRQ=$(find_irq "$WLAN_IF")
+    [ -z "$WLAN_IRQ" ] && WLAN_IRQ=$(find_irq "mlan")
+    if [ -n "$WLAN_IRQ" ]; then
+        echo $WLAN_AFFINITY_HEX > /proc/irq/$WLAN_IRQ/smp_affinity 2>/dev/null && \
+            log_info "  $WLAN_IF (IRQ $WLAN_IRQ) → CPU $WLAN_AFFINITY_CPU" || \
+            log_warn "  $WLAN_IF affinity 설정 실패"
+    else
+        log_warn "  $WLAN_IF: IRQ 미발견"
+    fi
 else
-    log_warn "  $ETH_IF: IRQ 미발견 또는 CPU 부족"
+    log_info "  IRQ affinity 설정 skip (policy=none, 커널 기본 분배)"
 fi
 
-WLAN_IRQ=$(find_irq "$WLAN_IF")
-[ -z "$WLAN_IRQ" ] && WLAN_IRQ=$(find_irq "mlan")
-if [ -n "$WLAN_IRQ" ] && [ $CPU_COUNT -gt 3 ]; then
-    echo 8 > /proc/irq/$WLAN_IRQ/smp_affinity 2>/dev/null && \
-        log_info "  $WLAN_IF (IRQ $WLAN_IRQ) → CPU 3" || \
-        log_warn "  $WLAN_IF affinity 설정 실패"
-else
-    log_warn "  $WLAN_IF: IRQ 미발견 또는 CPU 부족"
-fi
-
-# ─── 2. RPS (공통) ───
+# ─── 2. RPS ───
 log_info "[2/5] RPS (Receive Packet Steering)"
 
-if [ -d "/sys/class/net/$ETH_IF/queues/rx-0" ]; then
-    echo 4 > /sys/class/net/$ETH_IF/queues/rx-0/rps_cpus 2>/dev/null && \
-        log_info "  $ETH_IF RPS → CPU 2" || log_warn "  $ETH_IF RPS 실패"
-fi
-if [ -d "/sys/class/net/$WLAN_IF/queues/rx-0" ]; then
-    echo 8 > /sys/class/net/$WLAN_IF/queues/rx-0/rps_cpus 2>/dev/null && \
-        log_info "  $WLAN_IF RPS → CPU 3" || log_warn "  $WLAN_IF RPS 실패"
+if [ "$IRQ_AFFINITY" = "pinned" ]; then
+    if [ -d "/sys/class/net/$ETH_IF/queues/rx-0" ]; then
+        echo $ETH_AFFINITY_HEX > /sys/class/net/$ETH_IF/queues/rx-0/rps_cpus 2>/dev/null && \
+            log_info "  $ETH_IF RPS → CPU $ETH_AFFINITY_CPU" || log_warn "  $ETH_IF RPS 실패"
+    fi
+    if [ -d "/sys/class/net/$WLAN_IF/queues/rx-0" ]; then
+        echo $WLAN_AFFINITY_HEX > /sys/class/net/$WLAN_IF/queues/rx-0/rps_cpus 2>/dev/null && \
+            log_info "  $WLAN_IF RPS → CPU $WLAN_AFFINITY_CPU" || log_warn "  $WLAN_IF RPS 실패"
+    fi
+else
+    log_info "  RPS 설정 skip (policy=none)"
 fi
 
 # ─── 3. Ring Buffer (공통) ───
@@ -314,6 +355,7 @@ WBRIDGE_PROFILE_EFFECTIVE=$PROFILE_EFFECTIVE
 WBRIDGE_THERMAL_STATE=$THERMAL_STATE
 WBRIDGE_MODE_FORCE=$MODE_FORCE
 WBRIDGE_MODE=$PROFILE_EFFECTIVE
+WBRIDGE_IRQ_AFFINITY=$IRQ_AFFINITY
 # wbridge-pcap용
 WBRIDGE_DISPATCH_BUDGET=$WB_DISPATCH_BUDGET
 WBRIDGE_IMMEDIATE=$WB_IMMEDIATE
@@ -340,4 +382,8 @@ log_info "  WBRIDGE_TPACKET_RETIRE_TOV=$WB_TPACKET_RETIRE_TOV"
 
 # ─── 결과 요약 ───
 log_info "=== 최적화 완료 [mode=$MODE, $MODE_DESC] ==="
-log_info "  IRQ: $ETH_IF→CPU2, $WLAN_IF→CPU3 | Coalescing: rx-usecs=$RX_USECS, rx-frames=$RX_FRAMES | GRO=$GRO"
+if [ "$IRQ_AFFINITY" = "pinned" ]; then
+    log_info "  IRQ: $ETH_IF→CPU$ETH_AFFINITY_CPU, $WLAN_IF→CPU$WLAN_AFFINITY_CPU | Coalescing: rx-usecs=$RX_USECS, rx-frames=$RX_FRAMES | GRO=$GRO"
+else
+    log_info "  IRQ: kernel default | Coalescing: rx-usecs=$RX_USECS, rx-frames=$RX_FRAMES | GRO=$GRO"
+fi
