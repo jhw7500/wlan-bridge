@@ -10,65 +10,150 @@ sudo ./setup-irq-affinity.sh --mode <MODE> <eth_if> <wlan_if>
 
 ---
 
+## 설정 구조 및 조합
+
+### JSON 설정 구조 (`wifi_init_conf.json → wbridge`)
+
+```
+wbridge
+├── enabled              # bridge 전체 ON/OFF (마스터 스위치)
+├── bridge_iface         # bridge 인터페이스 (mlan0/mlan1)
+├── engine               # pcap | tpacket
+├── optimize
+│   ├── enabled          # 커널 레벨 튜닝 ON/OFF
+│   ├── mode             # latency | normal | eco | thermal
+│   └── irq_affinity     # auto | pinned | none
+├── link_guard
+│   └── enabled          # 링크 감시 ON/OFF
+└── thermal
+    └── mode_force       # thermal 클램핑 무시 여부
+```
+
+### 설정 조합별 동작
+
+#### 1단계: `wbridge.enabled`
+
+| 값 | 동작 |
+|---|---|
+| `true` | bridge 서비스 활성, 아래 설정 적용 |
+| `false` | bridge 서비스 전체 stop+disable, 이하 모든 설정 무효 |
+
+#### 2단계: `optimize.enabled` — 커널 튜닝 제어
+
+| `optimize.enabled` | 적용되는 것 | 적용 안 되는 것 |
+|---|---|---|
+| `false` (기본) | wbridge 바이너리 내부 기본값만 (RT, mlock, affinity, immediate, 4MB pcap buffer) | UDP 버퍼, TX큐, IRQ pinning, RPS, coalescing, 오프로드, cpufreq, wbridge 환경변수 오버라이드 |
+| `true` | 위 전부 + `optimize-for-udp.sh` + `setup-irq-affinity.sh` + `/run/wbridge.env` 생성 | — |
+
+#### 3단계: `optimize.irq_affinity` — IRQ/RPS 제어 (`optimize.enabled=true` 시)
+
+| `irq_affinity` | IRQ pinning | RPS | Coalescing | 오프로드 | Ring buffer |
+|---|---|---|---|---|---|
+| `none` | ❌ 커널 기본 | ❌ skip | ✅ 모드별 | ✅ 모드별 | ✅ 적용 |
+| `auto` | 2코어+면 pinned, 1코어면 none | 동일 | ✅ 모드별 | ✅ 모드별 | ✅ 적용 |
+| `pinned` | ✅ 4코어: ETH→CPU2, WLAN→CPU3 / 2코어: ETH→CPU0, WLAN→CPU1 | ✅ 동일 매핑 | ✅ 모드별 | ✅ 모드별 | ✅ 적용 |
+
+#### 4단계: `thermal.mode_force` × `thermal_state` — Effective 모드 결정
+
+| `mode_force` | `thermal_state` | 요청 모드 | **effective 모드** | UDP 최적화 |
+|---|---|---|---|---|
+| `true` (기본) | 무관 | 그대로 | **요청 모드 강제** | ✅ 실행 |
+| `false` | `ok` | 그대로 | 요청 모드 | ✅ 실행 |
+| `false` | `warm` | latency | **normal** | ✅ 실행 |
+| `false` | `warm` | normal/eco | 그대로 | ✅ 실행 |
+| `false` | `hot` | 무관 | **thermal** | ❌ skip |
+
+> `thermal_state`는 런타임 값으로 `/run/wbridge.thermal.env`에서 주입됩니다. JSON에 설정하지 않습니다.
+
+### 레이어별 적용 요약
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ wbridge 바이너리 내부 (항상 적용)                         │
+│  RT 스케줄링(SCHED_FIFO) + mlockall + CPU affinity      │
+│  + pcap immediate(1ms) + 4MB buffer + IP filter         │
+├─────────────────────────────────────────────────────────┤
+│ optimize.enabled=true 시 추가                            │
+│  ┌─ optimize-for-udp.sh ───────────────────────────┐    │
+│  │  TX큐 10000, 소켓버퍼 16MB, netdev backlog      │    │
+│  │  파워세이브 OFF, ring buffer, UDP 메모리          │    │
+│  └─────────────────────────────────────────────────┘    │
+│  ┌─ setup-irq-affinity.sh (모드별) ────────────────┐    │
+│  │  IRQ pinning, RPS, coalescing, 오프로드          │    │
+│  │  cpufreq governor (eco/thermal), cpuidle         │    │
+│  └─────────────────────────────────────────────────┘    │
+│  ┌─ /run/wbridge.env (모드별 wbridge 파라미터) ────┐    │
+│  │  DISPATCH_BUDGET, IMMEDIATE, TIMEOUT_MS          │    │
+│  │  RT_PRIORITY, PCAP_BUFFER, TPACKET_RETIRE_TOV    │    │
+│  └─────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────┘
+```
+
+---
+
 ## 모드별 비교표
 
 ### setup-irq-affinity.sh (ethtool)
 
-| 항목 | latency | normal | thermal |
-|---|---|---|---|
-| **rx-usecs** | 0 | 50 | 150 |
-| **tx-usecs** | 0 | 50 | 150 |
-| **rx-frames** | 1 | 4 | 10 |
-| **GRO** | off | on | on |
-| **GSO** | off | off | off |
-| **TSO** | off | off | off |
-| **인터럽트 빈도** (100Mbps) | ~8,000/s | ~2,000/s | ~200/s |
-| **추가 레이턴시** | 0us | ~50us | ~150us |
-| **발열** | 높음 | 중간 | 낮음 |
+| 항목 | latency | normal | eco | thermal |
+|---|---|---|---|---|
+| **rx-usecs** | 0 | 50 | 100 | 150 |
+| **tx-usecs** | 0 | 50 | 100 | 150 |
+| **rx-frames** | 1 | 4 | 6 | 10 |
+| **GRO** | off | on | on | on |
+| **GSO** | off | off | off | off |
+| **TSO** | off | off | off | off |
+| **cpufreq** | — | — | conservative | powersave |
+| **cpuidle deep** | — | — | — | 전부 활성화 |
+| **인터럽트 빈도** (100Mbps) | ~8,000/s | ~2,000/s | ~1,000/s | ~200/s |
+| **추가 레이턴시** | 0us | ~50us | ~100us | ~150us |
+| **발열** | 높음 | 중간 | 낮음 | 최소 |
 
 ### wbridge 환경변수
 
 #### wbridge-pcap용 (libpcap 기반)
 
-| 환경변수 | latency | normal (기본값) | thermal | 설명 |
-|---|---|---|---|---|
-| `WBRIDGE_DISPATCH_BUDGET` | 64 | 64 | **128** | pcap_dispatch 1회당 최대 패킷 수 |
-| `WBRIDGE_IMMEDIATE` | 1 | 1 | **0** | pcap immediate mode (패킷 도착 즉시 전달) |
-| `WBRIDGE_TIMEOUT_MS` | 1 | 1 | **10** | pcap 폴링 타임아웃 (ms) |
-| `WBRIDGE_RT_PRIORITY` | **80** | 50 | **30** | SCHED_FIFO 우선순위 (1~99) |
-| `WBRIDGE_PCAP_BUFFER` | 4194304 | 4194304 | **8388608** | pcap RX 버퍼 크기 (bytes) |
+| 환경변수 | latency | normal (기본값) | eco | thermal | 설명 |
+|---|---|---|---|---|---|
+| `WBRIDGE_DISPATCH_BUDGET` | 64 | 64 | **96** | **128** | pcap_dispatch 1회당 최대 패킷 수 |
+| `WBRIDGE_IMMEDIATE` | 1 | 1 | **0** | **0** | pcap immediate mode (패킷 도착 즉시 전달) |
+| `WBRIDGE_TIMEOUT_MS` | 1 | 1 | **5** | **10** | pcap 폴링 타임아웃 (ms) |
+| `WBRIDGE_RT_PRIORITY` | **80** | 50 | **40** | **30** | SCHED_FIFO 우선순위 (1~99) |
+| `WBRIDGE_PCAP_BUFFER` | 4194304 | 4194304 | 4194304 | **8388608** | pcap RX 버퍼 크기 (bytes) |
 
 #### wbridge-tpacket용 (TPACKET_V3 기반)
 
-| 환경변수 | latency | normal (기본값) | thermal | 설명 |
-|---|---|---|---|---|
-| `WBRIDGE_TPACKET_RETIRE_TOV` | 1 | 1 | **10** | Block retire timeout (ms) |
-| `WBRIDGE_RT_PRIORITY` | **80** | 50 | **30** | SCHED_FIFO 우선순위 (1~99) |
+| 환경변수 | latency | normal (기본값) | eco | thermal | 설명 |
+|---|---|---|---|---|---|
+| `WBRIDGE_TPACKET_RETIRE_TOV` | 1 | 1 | **5** | **10** | Block retire timeout (ms) |
+| `WBRIDGE_RT_PRIORITY` | **80** | 50 | **40** | **30** | SCHED_FIFO 우선순위 (1~99) |
 
 > **참고:** `wbridge-tpacket`은 TPACKET_V3 zero-copy mmap을 사용하므로 버퍼 크기와 dispatch budget이 필요 없습니다. Block 배치 처리로 자동 최적화됩니다.
 
 ### 왜 달라지는가
 
-| 환경변수 | latency에서 | thermal에서 |
-|---|---|---|
-| **DISPATCH_BUDGET=64** | 적은 양을 자주 처리 → 지연 최소 | - |
-| **DISPATCH_BUDGET=128** | - | 한번에 많이 처리 → wakeup 횟수 감소 |
-| **IMMEDIATE=1** | 패킷 도착 즉시 pcap에서 반환 | - |
-| **IMMEDIATE=0** | - | timeout까지 대기 후 배치 반환 → CPU idle 확보 |
-| **TIMEOUT_MS=1** | 1ms마다 깨어남 → 빠른 반응 | - |
-| **TIMEOUT_MS=10** | - | 10ms 간격 → CPU가 C-state 진입 가능 |
-| **RT_PRIORITY=80** | 높은 우선순위 → 선점 스케줄링 유리 | - |
-| **RT_PRIORITY=30** | - | 낮은 우선순위 → 스케줄러 부하 감소 |
-| **PCAP_BUFFER=8MB** | - | 병합으로 burst 도착 → 큰 버퍼로 드롭 방지 |
+| 환경변수 | latency에서 | eco에서 | thermal에서 |
+|---|---|---|---|
+| **DISPATCH_BUDGET=64** | 적은 양을 자주 처리 → 지연 최소 | - | - |
+| **DISPATCH_BUDGET=96/128** | - | eco: 중간 배치 | thermal: 큰 배치 → wakeup 횟수 최소 |
+| **IMMEDIATE=1** | 패킷 도착 즉시 pcap에서 반환 | - | - |
+| **IMMEDIATE=0** | - | timeout까지 대기 후 배치 반환 | CPU idle 확보 극대화 |
+| **TIMEOUT_MS=1** | 1ms마다 깨어남 → 빠른 반응 | - | - |
+| **TIMEOUT_MS=5/10** | - | eco: 5ms 간격 | thermal: 10ms → C-state 진입 가능 |
+| **RT_PRIORITY=80** | 높은 우선순위 → 선점 스케줄링 유리 | - | - |
+| **RT_PRIORITY=40/30** | - | eco: 중간 | thermal: 낮음 → 스케줄러 부하 감소 |
+| **PCAP_BUFFER=8MB** | - | - | 병합으로 burst 도착 → 큰 버퍼로 드롭 방지 |
+| **cpufreq=conservative** | - | up=80/down=20, 필요할 때만 클럭 상승 | - |
+| **cpufreq=powersave** | - | - | 최저 클럭 고정 + deep idle 활성화 |
 
 ### 공통 설정 (모드 무관)
 
 | 항목 | 값 | 설명 |
 |---|---|---|
-| IRQ Affinity ETH | CPU 2 | `echo 4 > /proc/irq/<N>/smp_affinity` |
-| IRQ Affinity WLAN | CPU 3 | `echo 8 > /proc/irq/<N>/smp_affinity` |
-| RPS ETH | CPU 2 | `echo 4 > /sys/class/net/eth0/queues/rx-0/rps_cpus` |
-| RPS WLAN | CPU 3 | `echo 8 > /sys/class/net/mlan0/queues/rx-0/rps_cpus` |
+| IRQ Affinity ETH | CPU 2 (4코어 pinned 시) | `echo 4 > /proc/irq/<N>/smp_affinity` |
+| IRQ Affinity WLAN | CPU 3 (4코어 pinned 시) | `echo 8 > /proc/irq/<N>/smp_affinity` |
+| RPS ETH | CPU 2 (4코어 pinned 시) | `echo 4 > /sys/class/net/eth0/queues/rx-0/rps_cpus` |
+| RPS WLAN | CPU 3 (4코어 pinned 시) | `echo 8 > /sys/class/net/mlan0/queues/rx-0/rps_cpus` |
 | Ring Buffer | rx:4096 tx:4096 | `ethtool -G <if> rx 4096 tx 4096` |
 | RX/TX Checksum | on | `ethtool -K <if> rx on tx on` |
 | WBRIDGE_AFFINITY | 1 | Thread 0→CPU 0, Thread 1→CPU 1 |
@@ -76,6 +161,8 @@ sudo ./setup-irq-affinity.sh --mode <MODE> <eth_if> <wlan_if>
 | WBRIDGE_MLOCK | 1 | 메모리 잠금 (page fault 방지) |
 | WBRIDGE_SNAPLEN | 1600 | 패킷 캡처 길이 |
 | WBRIDGE_PROMISC | 1 | 무차별 모드 |
+
+> **참고:** IRQ Affinity, RPS는 `irq_affinity=pinned` (또는 `auto`+2코어 이상) 일 때만 적용됩니다. `irq_affinity=none`이면 커널 기본 분배를 사용합니다.
 
 ---
 
@@ -119,6 +206,28 @@ wbridge eth0 mlan0
 - GRO ON (수신 패킷 병합)
 - RT 우선순위 50 (기본)
 - 적절한 레이턴시와 발열의 균형
+
+### eco 모드 (저전력)
+
+```bash
+# 1. 네트워크 설정
+sudo ./setup-irq-affinity.sh --mode eco eth0 mlan0
+
+# 2. wbridge 실행
+WBRIDGE_DISPATCH_BUDGET=96 \
+WBRIDGE_IMMEDIATE=0 \
+WBRIDGE_TIMEOUT_MS=5 \
+WBRIDGE_RT_PRIORITY=40 \
+  wbridge eth0 mlan0
+```
+
+**용도:** 온도 저감 + 레이턴시 유지가 필요한 환경
+**특성:**
+- 100us 병합 또는 6패킷마다 인터럽트
+- immediate mode OFF (5ms 배치 전달)
+- cpufreq conservative (필요할 때만 클럭 상승, up=80/down=20)
+- RT 우선순위 40 (normal보다 약간 낮음)
+- thermal보다 레이턴시 양호 (~100us), normal보다 발열 낮음
 
 ### thermal 모드 (발열 최소화)
 
@@ -178,7 +287,7 @@ WBRIDGE_IMMEDIATE=1 WBRIDGE_TIMEOUT_MS=1 WBRIDGE_RT_PRIORITY=80 \
 | 키 | 의미 |
 |---|---|
 | `WBRIDGE_PROFILE_VERSION` | 프로파일 스키마 버전 |
-| `WBRIDGE_MODE_REQUESTED` | 요청 모드 (`latency`/`normal`/`thermal`) |
+| `WBRIDGE_MODE_REQUESTED` | 요청 모드 (`latency`/`normal`/`eco`/`thermal`) |
 | `WBRIDGE_PROFILE_EFFECTIVE` | 실제 적용 모드 (thermal 상태에 따라 clamp 가능) |
 | `WBRIDGE_THERMAL_STATE` | 열 상태 힌트 (`ok`/`warm`/`hot`) |
 | `WBRIDGE_MODE_FORCE` | 강등 우회 플래그 (`0`: clamp 적용, `1`: 요청 모드 강제) |
@@ -194,19 +303,37 @@ effective 값은 `/run/wbridge.effective.json`에도 기록됩니다.
 
 ## 운영 사용법 (systemd)
 
-`/etc/default/wbridge` 또는 유닛 오버라이드에 아래 키를 설정합니다.
+`/etc/default/wbridge` 또는 `wifi_init_conf.json`의 `wbridge` 섹션에서 설정합니다.
+
+```json
+// wifi_init_conf.json
+"wbridge": {
+    "enabled": true,
+    "engine": "pcap",
+    "optimize": {
+        "enabled": true,
+        "mode": "normal",
+        "irq_affinity": "auto",
+        "profile_version": 1
+    },
+    "thermal": {
+        "mode_force": false
+    }
+}
+```
+
+환경변수 오버라이드 (`/etc/default/wbridge`):
 
 ```bash
 WBRIDGE_OPTIMIZE=1
 WBRIDGE_MODE=normal
 WBRIDGE_ENGINE=pcap
-WBRIDGE_THERMAL_STATE=ok
+WBRIDGE_IRQ_AFFINITY=auto
 WBRIDGE_MODE_FORCE=0
-WBRIDGE_PROFILE_VERSION=1
 ```
 
-thermal 상태에서 자동으로 공격적 UDP 튜닝(`optimize-for-udp.sh`)은 스킵됩니다.
-단, `WBRIDGE_MODE_FORCE=1`이면 thermal에서도 강제 실행됩니다.
+thermal effective 모드에서는 공격적 UDP 튜닝(`optimize-for-udp.sh`)이 자동 스킵됩니다.
+단, `thermal.mode_force=true` (또는 `WBRIDGE_MODE_FORCE=1`)이면 thermal에서도 강제 실행됩니다.
 
 엔진 선택:
 

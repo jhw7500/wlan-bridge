@@ -27,6 +27,7 @@ log_err()   { logger -p local0.err   "[$TAG] $*"; echo -e "${RED}$*${NC}"; }
 
 # ─── 기본값 ───
 MODE="normal"
+BUS_TYPE="${WBRIDGE_BUS_TYPE:-pcie}"
 PROFILE_VERSION="${WBRIDGE_PROFILE_VERSION:-1}"
 THERMAL_STATE="${WBRIDGE_THERMAL_STATE:-unknown}"
 MODE_FORCE="${WBRIDGE_MODE_FORCE:-0}"
@@ -38,8 +39,12 @@ while [[ $# -gt 0 ]]; do
             MODE="$2"
             shift 2
             ;;
+        --bus-type)
+            BUS_TYPE="$2"
+            shift 2
+            ;;
         -h|--help)
-            echo "사용법: $0 [--mode MODE] <eth_interface> <wlan_interface>"
+            echo "사용법: $0 [--mode MODE] [--bus-type TYPE] <eth_interface> <wlan_interface>"
             echo ""
             echo "MODE:"
             echo "  latency  - 레이턴시 최소화 (인터럽트 즉시 처리, GRO OFF)"
@@ -47,10 +52,14 @@ while [[ $# -gt 0 ]]; do
             echo "  thermal  - 발열 최소화 (인터럽트 병합, GRO ON)"
             echo "  normal   - 균형 모드 (기본값)"
             echo ""
+            echo "BUS TYPE:"
+            echo "  pcie     - PCIe 버스 (imx8mm, 기본값)"
+            echo "  sdio     - SDIO 버스 (imx93, WLAN IRQ를 mmc2에서 검색)"
+            echo ""
             echo "예:"
-            echo "  $0 eth0 mlan0                    # normal 모드"
-            echo "  $0 --mode latency eth0 mlan0     # 레이턴시 우선"
-            echo "  $0 --mode thermal eth0 mlan0     # 발열 우선"
+            echo "  $0 eth0 mlan0                              # normal/pcie"
+            echo "  $0 --mode latency eth0 mlan0               # 레이턴시 우선"
+            echo "  $0 --mode normal --bus-type sdio eth0 mlan0 # imx93 SDIO"
             echo ""
             echo "wbridge 환경변수는 $ENV_FILE 에 저장됩니다."
             exit 0
@@ -170,7 +179,7 @@ case "$MODE" in
         ;;
 esac
 
-log_info "=== IRQ/네트워크 최적화 시작 [mode=$MODE, $MODE_DESC] ==="
+log_info "=== IRQ/네트워크 최적화 시작 [mode=$MODE, $MODE_DESC, bus=$BUS_TYPE] ==="
 log_info "유선: $ETH_IF / 무선: $WLAN_IF"
 
 # ─── CPU 코어 수 확인 ───
@@ -215,12 +224,32 @@ fi
 
 # ─── IRQ 찾기 ───
 find_irq() {
-    local iface=$1
-    cat /proc/interrupts | grep -i "$iface" | awk '{print $1}' | tr -d ':' | head -1
+    local pattern=$1
+    cat /proc/interrupts | grep -i "$pattern" | awk '{print $1}' | tr -d ':' | head -1
+}
+
+# SDIO 버스의 WLAN IRQ는 인터페이스 이름이 아닌 mmc 컨트롤러로 등록됨
+# imx93: mmc2 (IRQ 96)
+find_wlan_irq() {
+    local wlan_if=$1
+    local irq=""
+
+    if [ "$BUS_TYPE" = "sdio" ]; then
+        # SDIO: mmc2에서 검색 (mmc0은 eMMC이므로 제외)
+        irq=$(find_irq "mmc2")
+        [ -z "$irq" ] && irq=$(find_irq "mmc1")
+        [ -z "$irq" ] && irq=$(find_irq "$wlan_if")
+    else
+        # PCIe: 인터페이스 이름으로 검색
+        irq=$(find_irq "$wlan_if")
+        [ -z "$irq" ] && irq=$(find_irq "mlan")
+    fi
+
+    echo "$irq"
 }
 
 # ─── 1. IRQ Affinity ───
-log_info "[1/5] IRQ Affinity [policy=$IRQ_AFFINITY]"
+log_info "[1/5] IRQ Affinity [policy=$IRQ_AFFINITY, bus=$BUS_TYPE]"
 
 if [ "$IRQ_AFFINITY" = "pinned" ]; then
     ETH_IRQ=$(find_irq "$ETH_IF")
@@ -232,14 +261,13 @@ if [ "$IRQ_AFFINITY" = "pinned" ]; then
         log_warn "  $ETH_IF: IRQ 미발견"
     fi
 
-    WLAN_IRQ=$(find_irq "$WLAN_IF")
-    [ -z "$WLAN_IRQ" ] && WLAN_IRQ=$(find_irq "mlan")
+    WLAN_IRQ=$(find_wlan_irq "$WLAN_IF")
     if [ -n "$WLAN_IRQ" ]; then
         echo $WLAN_AFFINITY_HEX > /proc/irq/$WLAN_IRQ/smp_affinity 2>/dev/null && \
-            log_info "  $WLAN_IF (IRQ $WLAN_IRQ) → CPU $WLAN_AFFINITY_CPU" || \
+            log_info "  $WLAN_IF (IRQ $WLAN_IRQ, bus=$BUS_TYPE) → CPU $WLAN_AFFINITY_CPU" || \
             log_warn "  $WLAN_IF affinity 설정 실패"
     else
-        log_warn "  $WLAN_IF: IRQ 미발견"
+        log_warn "  $WLAN_IF: IRQ 미발견 (bus=$BUS_TYPE)"
     fi
 else
     log_info "  IRQ affinity 설정 skip (policy=none, 커널 기본 분배)"
@@ -346,9 +374,10 @@ fi
 log_info "[ENV] wbridge 환경변수 → $ENV_FILE"
 
 cat > "$ENV_FILE" <<EOF
-# wbridge 환경변수 (setup-irq-affinity.sh --mode $MODE 에 의해 생성)
+# wbridge 환경변수 (setup-irq-affinity.sh --mode $MODE --bus-type $BUS_TYPE 에 의해 생성)
 # 생성 시각: $(date '+%Y-%m-%d %H:%M:%S')
 # 모드 정책 메타데이터
+WBRIDGE_BUS_TYPE=$BUS_TYPE
 WBRIDGE_PROFILE_VERSION=$PROFILE_VERSION
 WBRIDGE_MODE_REQUESTED=$MODE_REQUESTED
 WBRIDGE_PROFILE_EFFECTIVE=$PROFILE_EFFECTIVE
@@ -381,7 +410,7 @@ log_info "  WBRIDGE_PCAP_BUFFER=$WB_PCAP_BUFFER"
 log_info "  WBRIDGE_TPACKET_RETIRE_TOV=$WB_TPACKET_RETIRE_TOV"
 
 # ─── 결과 요약 ───
-log_info "=== 최적화 완료 [mode=$MODE, $MODE_DESC] ==="
+log_info "=== 최적화 완료 [mode=$MODE, $MODE_DESC, bus=$BUS_TYPE] ==="
 if [ "$IRQ_AFFINITY" = "pinned" ]; then
     log_info "  IRQ: $ETH_IF→CPU$ETH_AFFINITY_CPU, $WLAN_IF→CPU$WLAN_AFFINITY_CPU | Coalescing: rx-usecs=$RX_USECS, rx-frames=$RX_FRAMES | GRO=$GRO"
 else
