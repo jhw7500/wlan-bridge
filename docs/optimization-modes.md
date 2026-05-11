@@ -303,10 +303,13 @@ effective 값은 `/run/wbridge.effective.json`에도 기록됩니다.
 
 ## 운영 사용법 (systemd)
 
-`/etc/default/wbridge` 또는 `wifi_init_conf.json`의 `wbridge` 섹션에서 설정합니다.
+`wifi_init_conf.json`의 `wbridge` 섹션이 **SSoT(Single Source of Truth)** 입니다.
+`/etc/default/wbridge`는 JSON이 없거나 파싱 실패 시에만 사용되는 **fallback** 입니다.
+
+**우선순위**: `wifi_init_conf.json` > `/etc/default/wbridge` > 스크립트 기본값
 
 ```json
-// wifi_init_conf.json
+// wifi_init_conf.json (SSoT)
 "wbridge": {
     "enabled": true,
     "engine": "pcap",
@@ -322,7 +325,7 @@ effective 값은 `/run/wbridge.effective.json`에도 기록됩니다.
 }
 ```
 
-환경변수 오버라이드 (`/etc/default/wbridge`):
+환경변수 폴백 (`/etc/default/wbridge`, JSON 복구 불가 시에만 사용):
 
 ```bash
 WBRIDGE_OPTIMIZE=1
