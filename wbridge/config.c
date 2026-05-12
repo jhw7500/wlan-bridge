@@ -153,16 +153,16 @@ void config_log(const struct bridge_config *cfg) {
     const char *thermal_state = env_to_str("WBRIDGE_THERMAL_STATE", "unknown");
     const char *mode_force = env_to_str("WBRIDGE_MODE_FORCE", "0");
 
-    syslog(LOG_INFO, "Profile: ver=%s requested=%s effective=%s thermal=%s force=%s",
+    SLOG(LOG_INFO, "Profile: ver=%s requested=%s effective=%s thermal=%s force=%s",
            profile_version, mode_requested, profile_effective, thermal_state, mode_force);
-    syslog(LOG_INFO, "Config: dispatch_budget=%d, timeout_ms=%d, snaplen=%d",
+    SLOG(LOG_INFO, "Config: dispatch_budget=%d, timeout_ms=%d, snaplen=%d",
            cfg->dispatch_budget, cfg->timeout_ms, cfg->snaplen);
-    syslog(LOG_INFO, "Config: pcap_buffer=%d bytes, rt_priority=%d",
+    SLOG(LOG_INFO, "Config: pcap_buffer=%d bytes, rt_priority=%d",
            cfg->pcap_buffer_bytes, cfg->rt_priority);
-    syslog(LOG_INFO, "Config: affinity=%d, rt=%d, mlock=%d, immediate=%d, promisc=%d",
+    SLOG(LOG_INFO, "Config: affinity=%d, rt=%d, mlock=%d, immediate=%d, promisc=%d",
            cfg->enable_affinity, cfg->enable_rt, cfg->enable_mlock,
            cfg->enable_immediate, cfg->enable_promisc);
-    syslog(LOG_INFO, "Config: mac_filter=%d, ip_filter=%d, debug_log=%d",
+    SLOG(LOG_INFO, "Config: mac_filter=%d, ip_filter=%d, debug_log=%d",
            cfg->enable_mac_filter, cfg->enable_ip_filter, cfg->enable_debug_log);
 }
 

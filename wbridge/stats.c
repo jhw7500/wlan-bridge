@@ -39,7 +39,7 @@ void stats_report(const struct bridge_stats *stats) {
     fprintf(stderr, "==========================================\n");
 
     // Also log to syslog
-    syslog(LOG_INFO, "Stats: if0 rx=%lu tx=%lu drop=%lu | if1 rx=%lu tx=%lu drop=%lu",
+    SLOG(LOG_INFO, "Stats: if0 rx=%lu tx=%lu drop=%lu | if1 rx=%lu tx=%lu drop=%lu",
            atomic_load(&stats->iface[0].rx_packets),
            atomic_load(&stats->iface[0].tx_packets),
            atomic_load(&stats->iface[0].dropped),

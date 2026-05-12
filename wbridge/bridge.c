@@ -29,7 +29,6 @@ extern void bridge_packet_handler(unsigned char *user_data,
                                  const struct pcap_pkthdr *hdr,
                                  const unsigned char *data);
 
-// Private helpers (from dumb.c)
 static int get_mac(const char *ifname, uint8_t mac[ETH_ALEN]) {
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) return -1;
@@ -136,7 +135,7 @@ static pcap_t *open_pcap_handle(const char *ifname, int is_rx, const struct brid
 
     int rc = pcap_activate(h);
     if (rc < 0) {
-        syslog(LOG_ERR, "Failed to activate %s: %s", ifname, pcap_statustostr(rc));
+        SLOG(LOG_ERR, "Failed to activate %s: %s", ifname, pcap_statustostr(rc));
         pcap_close(h);
         return NULL;
     }
@@ -155,7 +154,7 @@ static void *bridge_thread_func(void *arg) {
     struct bridge_interface *iface = &ctx->interfaces[i];
 
     if (pcap_setdirection(iface->rx_handle, PCAP_D_IN) != 0) {
-        syslog(LOG_WARNING, "pcap_setdirection ignored on %s", iface->name);
+        SLOG(LOG_WARNING, "pcap_setdirection ignored on %s", iface->name);
     }
 
     if (ctx->config.enable_affinity) {
@@ -179,7 +178,7 @@ static void *bridge_thread_func(void *arg) {
     }
     pthread_mutex_unlock(&ctx->mutex);
 
-    syslog(LOG_INFO, "Interface %s (if%d) worker thread started", iface->name, i);
+    SLOG(LOG_INFO, "Interface %s (if%d) worker thread started", iface->name, i);
 
     bridge_interface_t peer = bridge_peer(i);
     struct dispatch_counters *lc = &ctx->local_counters[i];
@@ -216,7 +215,7 @@ static void *bridge_thread_func(void *arg) {
         }
     }
 
-    syslog(LOG_INFO, "Interface %s worker thread exiting", iface->name);
+    SLOG(LOG_INFO, "Interface %s worker thread exiting", iface->name);
     return NULL;
 }
 
@@ -276,7 +275,7 @@ int bridge_init(struct bridge_context *ctx, const char *if0, const char *if1) {
             if (ctx->interfaces[i].ipv4 != 0) {
                 char ip_str[INET_ADDRSTRLEN];
                 inet_ntop(AF_INET, &ctx->interfaces[i].ipv4, ip_str, sizeof(ip_str));
-                syslog(LOG_INFO, "ip-filter: %s = %s (from %s)", names[i], ip_str, src);
+                SLOG(LOG_INFO, "ip-filter: %s = %s (from %s)", names[i], ip_str, src);
             }
         }
     }

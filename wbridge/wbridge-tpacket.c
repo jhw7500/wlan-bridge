@@ -18,6 +18,11 @@
 #include <time.h>
 #include <netinet/ip.h>
 
+// rsyslog-style "[file:line]" prefix를 자동 부착하는 syslog 매크로.
+// wifi_*.sh의 `logger -p ... "[$tag:$LINENO] ..."` 형식과 통일.
+#define SLOG(prio, fmt, ...) \
+    syslog((prio), "[%s:%d] " fmt, __FILE__, __LINE__, ##__VA_ARGS__)
+
 // AF_PACKET headers
 #include <arpa/inet.h>
 #include <linux/if_packet.h>
@@ -70,13 +75,21 @@ static int enable_ip_filter = 0;
 
 // TPACKET_V3 설정 (성능 최적화)
 // - 처리량(iperf) 목표면 블록/링을 키우고 retire timeout을 늘릴 수 있음
-// - 레이턴시(ping) 목표면 retire timeout을 줄이는 것이 핵심
+// - 레이턴시(ping) 목표면 BLOCK_SIZE/retire timeout을 줄이는 것이 핵심
 // - 8MB로 증가하여 버스트 트래픽 처리 능력 향상
-#define BLOCK_SIZE (64 * 1024)         // 64KB blocks
-#define FRAME_SIZE 2048                // 2KB per frame
-#define BLOCK_NR 128                   // 128 blocks = 8MB ring (최적화: 4MB → 8MB)
-#define FRAME_NR ((BLOCK_SIZE * BLOCK_NR) / FRAME_SIZE)
-#define RETIRE_TIMEOUT_MS 1            // 최적화: 2ms → 1ms (더 낮은 레이턴시)
+#define BLOCK_SIZE_DEFAULT (64 * 1024)     // 64KB blocks
+#define FRAME_SIZE_DEFAULT 2048            // 2KB per frame
+#define BLOCK_NR_DEFAULT 128               // 128 blocks = 8MB ring
+#define RETIRE_TIMEOUT_MS_DEFAULT 1        // 1ms (커널 floor)
+
+// RX ring 런타임 파라미터 (환경 변수로 override 가능)
+//   WBRIDGE_TPACKET_BLOCK_SIZE       (bytes, page-aligned)
+//   WBRIDGE_TPACKET_BLOCK_NR         (count)
+//   WBRIDGE_TPACKET_POLL_TIMEOUT_MS  (ms, 0 = retire_tov * 3 자동)
+static int tpacket_block_size = BLOCK_SIZE_DEFAULT;
+static int tpacket_frame_size = FRAME_SIZE_DEFAULT;
+static int tpacket_block_nr = BLOCK_NR_DEFAULT;
+static int tpacket_poll_timeout_ms = 0;    // 0 = auto (retire * 3)
 
 // TX_RING 설정(TPACKET_V2 기반)
 // - TPACKET_V3는 RX 쪽에 유리하고, TX_RING은 커널/환경에 따라 V2가 가장 호환성이 좋음
@@ -85,7 +98,7 @@ static int enable_ip_filter = 0;
 #define TX_FRAME_SIZE 2048
 #define TX_BLOCK_NR 128                // 8MB (최적화: 4MB → 8MB)
 #define TX_FRAME_NR ((TX_BLOCK_SIZE * TX_BLOCK_NR) / TX_FRAME_SIZE)
-#define DUMB_LINK_CHECK_STRIDE 64
+#define LINK_CHECK_STRIDE 64
 
 // Interface 구조체
 struct interface {
@@ -140,7 +153,7 @@ static void print_stats_impl(void) {
     }
     fprintf(stderr, "==========================================\n");
 
-    syslog(LOG_INFO, "Stats: %s rx=%lu tx=%lu drop=%lu | %s rx=%lu tx=%lu drop=%lu",
+    SLOG(LOG_INFO, "Stats: %s rx=%lu tx=%lu drop=%lu | %s rx=%lu tx=%lu drop=%lu",
            interfaces[0].name, atomic_load(&stats.per_thread[0].rx_packets),
            atomic_load(&stats.per_thread[0].tx_packets), atomic_load(&stats.per_thread[0].dropped),
            interfaces[1].name, atomic_load(&stats.per_thread[1].rx_packets),
@@ -278,12 +291,12 @@ static int create_socket(const char *ifname, int *ifindex) {
 
 // TPACKET_V3 RX ring 설정
 static int setup_rx_ring(struct interface *iface) {
-    // TPACKET_V3 설정
-    iface->req.tp_block_size = BLOCK_SIZE;
-    iface->req.tp_frame_size = FRAME_SIZE;
-    iface->req.tp_block_nr = BLOCK_NR;
-    iface->req.tp_frame_nr = FRAME_NR;
-    iface->req.tp_retire_blk_tov = tpacket_retire_tov_ms;  // 환경 변수 값 사용
+    // TPACKET_V3 설정 (런타임 변수, 환경 변수로 override 가능)
+    iface->req.tp_block_size = tpacket_block_size;
+    iface->req.tp_frame_size = tpacket_frame_size;
+    iface->req.tp_block_nr = tpacket_block_nr;
+    iface->req.tp_frame_nr = (tpacket_block_size * tpacket_block_nr) / tpacket_frame_size;
+    iface->req.tp_retire_blk_tov = tpacket_retire_tov_ms;
     iface->req.tp_feature_req_word = TP_FT_REQ_FILL_RXHASH;
 
     // TPACKET_V3 활성화
@@ -314,8 +327,9 @@ static int setup_rx_ring(struct interface *iface) {
         fprintf(stderr, "WARNING: PACKET_IGNORE_OUTGOING failed on %s: %s\n", iface->name, strerror(errno));
     }
 
-    fprintf(stderr, "Interface %s: TPACKET_V3 ring setup complete (%zu bytes, %u blocks, retire=%dms)\n",
-            iface->name, iface->ring_size, iface->req.tp_block_nr, tpacket_retire_tov_ms);
+    fprintf(stderr, "Interface %s: TPACKET_V3 ring setup complete (%zu bytes, %u blocks x %u bytes, frame=%u, retire=%dms)\n",
+            iface->name, iface->ring_size, iface->req.tp_block_nr, iface->req.tp_block_size,
+            iface->req.tp_frame_size, tpacket_retire_tov_ms);
 
     // Promiscuous mode: 브리지 목적이면 반드시 필요(호스트로 향하지 않는 프레임도 수신)
     struct packet_mreq mreq;
@@ -457,9 +471,13 @@ static void *interface_thread(void *arg) {
     pfd.events = POLLIN | POLLERR;
     pfd.revents = 0;
 
+    // poll timeout: 환경변수로 명시되면 사용, 0이면 retire_tov * 3 자동
+    const int effective_poll_timeout =
+        (tpacket_poll_timeout_ms > 0) ? tpacket_poll_timeout_ms
+                                      : (tpacket_retire_tov_ms * 3);
+
     while (atomic_load(&keep_running)) {
-        // Block이 준비될 때까지 poll (retire timeout의 3배)
-        int ret = poll(&pfd, 1, tpacket_retire_tov_ms * 3);
+        int ret = poll(&pfd, 1, effective_poll_timeout);
         if (ret < 0) {
             if (errno == EINTR) continue;
             fprintf(stderr, "ERROR: poll() failed: %s\n", strerror(errno));
@@ -470,7 +488,7 @@ static void *interface_thread(void *arg) {
 
         // Block descriptor 가져오기
         struct tpacket_block_desc *pbd = (struct tpacket_block_desc *)
-            ((uint8_t *)rx_iface->ring_rx + block_idx * BLOCK_SIZE);
+            ((uint8_t *)rx_iface->ring_rx + (size_t)block_idx * tpacket_block_size);
 
         // Block이 사용자 공간에서 사용 가능한지 확인
         if ((pbd->hdr.bh1.block_status & TP_STATUS_USER) == 0) {
@@ -527,7 +545,7 @@ static void *interface_thread(void *arg) {
                     if (carrier >= 0) {
                         peer_link_up_cached = carrier;
                     }
-                    link_check_skip = DUMB_LINK_CHECK_STRIDE;
+                    link_check_skip = LINK_CHECK_STRIDE;
                 } else {
                     link_check_skip--;
                 }
@@ -624,6 +642,9 @@ int main(int argc, char **argv) {
 
     // 환경 변수에서 최적화 모드 설정 읽기
     const char *env_retire_tov = getenv("WBRIDGE_TPACKET_RETIRE_TOV");
+    const char *env_block_size = getenv("WBRIDGE_TPACKET_BLOCK_SIZE");
+    const char *env_block_nr = getenv("WBRIDGE_TPACKET_BLOCK_NR");
+    const char *env_poll_timeout = getenv("WBRIDGE_TPACKET_POLL_TIMEOUT_MS");
     const char *env_rt_prio = getenv("WBRIDGE_RT_PRIORITY");
     const char *env_mac_filter = getenv("WBRIDGE_ENABLE_MAC_FILTER");
     const char *env_ip_filter = getenv("WBRIDGE_ENABLE_IP_FILTER");
@@ -650,17 +671,11 @@ int main(int argc, char **argv) {
         env_mode_force = "0";
     }
 
-    // MAC/IP 필터 (기존 DUMB_* 호환 + 새 WBRIDGE_* 변수)
+    // MAC/IP 필터
     tpacket_enable_mac_filter = (env_mac_filter && atoi(env_mac_filter)) ? 1 : 0;
-    if (!tpacket_enable_mac_filter) {
-        tpacket_enable_mac_filter = getenv("DUMB_MAC_FILTER") ? 1 : 0;
-    }
     enable_mac_filter = tpacket_enable_mac_filter;
 
     tpacket_enable_ip_filter = (env_ip_filter && atoi(env_ip_filter)) ? 1 : 0;
-    if (!tpacket_enable_ip_filter) {
-        tpacket_enable_ip_filter = getenv("DUMB_IP_FILTER") ? 1 : 0;
-    }
     enable_ip_filter = tpacket_enable_ip_filter;
 
     tpacket_link_guard = (env_link_guard && atoi(env_link_guard)) ? 1 : 0;
@@ -681,20 +696,56 @@ int main(int argc, char **argv) {
         if (tpacket_retire_tov_ms > 100) tpacket_retire_tov_ms = 100;
     }
 
+    // RX ring 형상 (BLOCK_SIZE / BLOCK_NR / POLL_TIMEOUT)
+    // 페이지 크기 기준 정렬 + 합리적 범위 clamp.
+    long sys_page_size = sysconf(_SC_PAGESIZE);
+    if (sys_page_size <= 0) sys_page_size = 4096;
+
+    if (env_block_size) {
+        int v = atoi(env_block_size);
+        if (v < (int)sys_page_size) v = (int)sys_page_size;
+        if (v > (4 * 1024 * 1024)) v = 4 * 1024 * 1024;
+        // page-aligned + frame_size의 배수 (TPACKET 요구사항)
+        v = (v / (int)sys_page_size) * (int)sys_page_size;
+        if (v < tpacket_frame_size) v = tpacket_frame_size;
+        if (v % tpacket_frame_size != 0) {
+            v = (v / tpacket_frame_size) * tpacket_frame_size;
+        }
+        tpacket_block_size = v;
+    }
+
+    if (env_block_nr) {
+        int v = atoi(env_block_nr);
+        if (v < 1) v = 1;
+        if (v > 1024) v = 1024;
+        tpacket_block_nr = v;
+    }
+
+    if (env_poll_timeout) {
+        int v = atoi(env_poll_timeout);
+        if (v < 0) v = 0;
+        if (v > 1000) v = 1000;
+        tpacket_poll_timeout_ms = v;
+    }
+
     memset(iface_ipv4, 0, sizeof(iface_ipv4));
     memset(iface_mac, 0, sizeof(iface_mac));
 
     // syslog 초기화
-    openlog("dumb-tpacket", LOG_PID | LOG_CONS, LOG_LOCAL0);
+    openlog("wbridge", LOG_PID | LOG_CONS, LOG_LOCAL0);
 
-    syslog(LOG_INFO,
+    SLOG(LOG_INFO,
            "Profile: ver=%s requested=%s effective=%s thermal=%s force=%s",
            env_profile_version, env_mode_requested, env_profile_effective, env_thermal_state,
            env_mode_force);
-    syslog(LOG_INFO,
+    SLOG(LOG_INFO,
            "Config: retire_tov=%dms, rt_priority=%d, mac_filter=%d, ip_filter=%d, link_guard=%d",
            tpacket_retire_tov_ms, tpacket_rt_priority, tpacket_enable_mac_filter, tpacket_enable_ip_filter,
            tpacket_link_guard);
+    SLOG(LOG_INFO,
+           "RX ring: block_size=%d, block_nr=%d, frame_size=%d, total=%lld bytes, poll_timeout=%dms (0=auto)",
+           tpacket_block_size, tpacket_block_nr, tpacket_frame_size,
+           (long long)tpacket_block_size * tpacket_block_nr, tpacket_poll_timeout_ms);
     fprintf(stderr,
             "Profile: ver=%s requested=%s effective=%s thermal=%s force=%s\n",
             env_profile_version, env_mode_requested, env_profile_effective, env_thermal_state,
@@ -703,6 +754,10 @@ int main(int argc, char **argv) {
             "Config: retire_tov=%dms, rt_priority=%d, mac_filter=%d, ip_filter=%d, link_guard=%d\n",
             tpacket_retire_tov_ms, tpacket_rt_priority, tpacket_enable_mac_filter, tpacket_enable_ip_filter,
             tpacket_link_guard);
+    fprintf(stderr,
+            "RX ring: block_size=%d, block_nr=%d, frame_size=%d, total=%lld bytes, poll_timeout=%dms (0=auto)\n",
+            tpacket_block_size, tpacket_block_nr, tpacket_frame_size,
+            (long long)tpacket_block_size * tpacket_block_nr, tpacket_poll_timeout_ms);
 
     // 시그널 핸들러
     struct sigaction sa_term = {.sa_handler = sighandler, .sa_flags = SA_RESTART};
@@ -782,7 +837,7 @@ int main(int argc, char **argv) {
             if (iface_ipv4[i] != 0) {
                 char ip_str[INET_ADDRSTRLEN];
                 inet_ntop(AF_INET, &iface_ipv4[i], ip_str, sizeof(ip_str));
-                syslog(LOG_INFO, "ip-filter: %s = %s (from %s)", interfaces[i].name, ip_str, src);
+                SLOG(LOG_INFO, "ip-filter: %s = %s (from %s)", interfaces[i].name, ip_str, src);
             }
         }
     }
@@ -822,7 +877,7 @@ int main(int argc, char **argv) {
     // 메인 루프
     fprintf(stderr, "TPACKET_V3 bridge running. Press Ctrl+C to stop, send SIGUSR1 for stats.\n");
     fprintf(stderr, "  Usage: kill -USR1 %d\n", getpid());
-    syslog(LOG_INFO, "TPACKET_V3 bridge started (PID %d)", getpid());
+    SLOG(LOG_INFO, "TPACKET_V3 bridge started (PID %d)", getpid());
 
     while (atomic_load(&keep_running)) {
         sleep(1);
@@ -861,7 +916,7 @@ int main(int argc, char **argv) {
     print_stats_impl();
 
     fprintf(stderr, "Shutdown complete.\n");
-    syslog(LOG_INFO, "TPACKET_V3 bridge stopped");
+    SLOG(LOG_INFO, "TPACKET_V3 bridge stopped");
     closelog();
 
     return 0;

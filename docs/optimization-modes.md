@@ -126,9 +126,12 @@ wbridge
 | 환경변수 | latency | normal (기본값) | eco | thermal | 설명 |
 |---|---|---|---|---|---|
 | `WBRIDGE_TPACKET_RETIRE_TOV` | 1 | 1 | **5** | **10** | Block retire timeout (ms) |
+| `WBRIDGE_TPACKET_BLOCK_SIZE` | **8192** | 16384 | **32768** | **65536** | RX ring block 크기 (bytes, page-aligned). 작을수록 idle stall 감소 |
+| `WBRIDGE_TPACKET_BLOCK_NR` | **32** | 64 | 64 | **128** | RX ring block 개수. burst 흡수용, latency 무관 |
+| `WBRIDGE_TPACKET_POLL_TIMEOUT_MS` | 1 | 1 | **3** | **10** | poll() timeout (ms). 0이면 retire_tov×3 자동 |
 | `WBRIDGE_RT_PRIORITY` | **80** | 50 | **40** | **30** | SCHED_FIFO 우선순위 (1~99) |
 
-> **참고:** `wbridge-tpacket`은 TPACKET_V3 zero-copy mmap을 사용하므로 버퍼 크기와 dispatch budget이 필요 없습니다. Block 배치 처리로 자동 최적화됩니다.
+> **참고:** TPACKET_V3 RX는 mmap zero-copy. 실시간성은 **block 크기 × retire_blk_tov**의 곱으로 결정됨 (block이 다 차거나 timeout 만료 시 user-space로 retire). `BLOCK_SIZE × BLOCK_NR`이 RX ring 총량으로, 작은 패킷의 idle traffic에서는 block이 안 차서 retire_tov 시간만큼 강제 stall 누적 → BLOCK_SIZE 축소가 latency 개선의 핵심 노브. TX_RING(TPACKET_V2)은 별도 매크로로 컴파일타임 고정(8MB).
 
 ### 왜 달라지는가
 
@@ -245,8 +248,11 @@ WBRIDGE_PCAP_BUFFER=8388608 \
 
 # 2-1. wbridge-tpacket 실행 (tpacket 기반)
 WBRIDGE_TPACKET_RETIRE_TOV=10 \
+WBRIDGE_TPACKET_BLOCK_SIZE=65536 \
+WBRIDGE_TPACKET_BLOCK_NR=128 \
+WBRIDGE_TPACKET_POLL_TIMEOUT_MS=10 \
 WBRIDGE_RT_PRIORITY=30 \
-  dumb-tpacket eth0 mlan0
+  wbridge-tpacket eth0 mlan0
 ```
 
 **용도:** 고온 환경, Commercial grade SoC, 밀폐 장치
@@ -359,7 +365,7 @@ cat /run/wbridge.effective.json
 journalctl -u wifi_bridge@mlan0 -n 100 --no-pager | grep -E "Profile:|effective="
 
 # tpacket 실행 시 profile 로그 확인
-journalctl -t dumb-tpacket -n 50 --no-pager
+journalctl -t wbridge-tpacket -n 50 --no-pager
 ```
 
 종합 스모크 테스트:

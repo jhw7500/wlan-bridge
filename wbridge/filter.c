@@ -5,16 +5,18 @@
 
 #include "filter.h"
 #include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
 #include <netinet/ip.h>
 #include <net/if_arp.h>
 #include <arpa/inet.h>
-#include <syslog.h>
 
-// Rate-limited debug logging
-static void filter_debug_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+// Rate-limited debug logging.
+// caller가 __FILE__/__LINE__ 정보를 매크로로 자동 전달 → "[file:line] msg" 형식.
+static void filter_debug_log_impl(const char *file, int line, const char *fmt, ...)
+    __attribute__((format(printf, 3, 4)));
 
-static void filter_debug_log(const char *fmt, ...) {
+static void filter_debug_log_impl(const char *file, int line, const char *fmt, ...) {
     static atomic_ulong log_count = 0;
     static time_t last_log_time = 0;
 
@@ -23,13 +25,18 @@ static void filter_debug_log(const char *fmt, ...) {
 
     // Log first occurrence, then every 1000 hits or every second
     if (count == 1 || count % 1000 == 0 || (last_log_time > 0 && now > last_log_time)) {
+        char prefixed_fmt[512];
+        snprintf(prefixed_fmt, sizeof(prefixed_fmt), "[%s:%d] %s", file, line, fmt);
         va_list args;
         va_start(args, fmt);
-        vsyslog(LOG_DEBUG, fmt, args);
+        vsyslog(LOG_DEBUG, prefixed_fmt, args);
         va_end(args);
         last_log_time = now;
     }
 }
+
+#define filter_debug_log(fmt, ...) \
+    filter_debug_log_impl(__FILE__, __LINE__, fmt, ##__VA_ARGS__)
 
 void filter_init(struct packet_filter *filter,
                 const struct bridge_config *config,

@@ -13,6 +13,13 @@
 #include <netinet/if_ether.h>
 #include <pcap/pcap.h>
 #include <pthread.h>
+#include <syslog.h>
+
+// rsyslog-style "[file:line]" prefix를 자동 부착하는 syslog 매크로.
+// wifi_*.sh의 `logger -p ... "[$tag:$LINENO] ..."` 형식과 통일.
+// __FILE__은 Makefile이 짧은 상대 경로 (예: "main.c")로 전달.
+#define SLOG(prio, fmt, ...) \
+    syslog((prio), "[%s:%d] " fmt, __FILE__, __LINE__, ##__VA_ARGS__)
 
 // Version information
 #define BRIDGE_VERSION "2.0.0-refactored"

@@ -21,9 +21,10 @@ TAG="setup-irq-affinity"
 ENV_FILE="/run/wbridge.env"
 
 # ─── 로깅 ───
-log_info()  { logger -p local0.info  "[$TAG] $*"; echo -e "${GREEN}$*${NC}"; }
-log_warn()  { logger -p local0.warn  "[$TAG] $*"; echo -e "${YELLOW}$*${NC}"; }
-log_err()   { logger -p local0.err   "[$TAG] $*"; echo -e "${RED}$*${NC}"; }
+# BASH_LINENO[0]는 함수 호출자의 라인 번호 → C 코드의 __LINE__ 와 동일 형식.
+log_info()  { local ln=${BASH_LINENO[0]}; logger -p local0.info  "[$TAG:$ln] $*"; echo -e "${GREEN}$*${NC}"; }
+log_warn()  { local ln=${BASH_LINENO[0]}; logger -p local0.warn  "[$TAG:$ln] $*"; echo -e "${YELLOW}$*${NC}"; }
+log_err()   { local ln=${BASH_LINENO[0]}; logger -p local0.err   "[$TAG:$ln] $*"; echo -e "${RED}$*${NC}"; }
 
 # ─── 기본값 ───
 MODE="normal"
@@ -136,7 +137,11 @@ case "$MODE" in
         WB_RT_PRIORITY=80
         WB_PCAP_BUFFER=4194304
         # wbridge-tpacket 환경변수
+        # 작은 block(8KB) + 작은 ring(256KB) + poll=1ms로 idle stall 제거.
         WB_TPACKET_RETIRE_TOV=1
+        WB_TPACKET_BLOCK_SIZE=8192
+        WB_TPACKET_BLOCK_NR=32
+        WB_TPACKET_POLL_TIMEOUT_MS=1
         ;;
     thermal)
         MODE_DESC="발열 최소화"
@@ -149,7 +154,11 @@ case "$MODE" in
         WB_RT_PRIORITY=30
         WB_PCAP_BUFFER=8388608
         # wbridge-tpacket 환경변수 (발열 최적화)
+        # 큰 block(64KB) + 큰 ring(8MB) + poll=10ms로 wakeup 최소.
         WB_TPACKET_RETIRE_TOV=10
+        WB_TPACKET_BLOCK_SIZE=65536
+        WB_TPACKET_BLOCK_NR=128
+        WB_TPACKET_POLL_TIMEOUT_MS=10
         ;;
     eco)
         MODE_DESC="저전력 (온도 저감)"
@@ -162,7 +171,11 @@ case "$MODE" in
         WB_RT_PRIORITY=40
         WB_PCAP_BUFFER=4194304
         # wbridge-tpacket 환경변수
+        # 중간 block(32KB) + 2MB ring + poll=3ms.
         WB_TPACKET_RETIRE_TOV=5
+        WB_TPACKET_BLOCK_SIZE=32768
+        WB_TPACKET_BLOCK_NR=64
+        WB_TPACKET_POLL_TIMEOUT_MS=3
         ;;
     normal)
         MODE_DESC="균형 (일반)"
@@ -174,8 +187,12 @@ case "$MODE" in
         WB_TIMEOUT_MS=1
         WB_RT_PRIORITY=50
         WB_PCAP_BUFFER=4194304
-        # wbridge-tpacket 환경변수 (기본값)
+        # wbridge-tpacket 환경변수
+        # 16KB block + 1MB ring + poll=1ms.
         WB_TPACKET_RETIRE_TOV=1
+        WB_TPACKET_BLOCK_SIZE=16384
+        WB_TPACKET_BLOCK_NR=64
+        WB_TPACKET_POLL_TIMEOUT_MS=1
         ;;
 esac
 
@@ -393,6 +410,9 @@ WBRIDGE_RT_PRIORITY=$WB_RT_PRIORITY
 WBRIDGE_PCAP_BUFFER=$WB_PCAP_BUFFER
 # wbridge-tpacket용
 WBRIDGE_TPACKET_RETIRE_TOV=$WB_TPACKET_RETIRE_TOV
+WBRIDGE_TPACKET_BLOCK_SIZE=$WB_TPACKET_BLOCK_SIZE
+WBRIDGE_TPACKET_BLOCK_NR=$WB_TPACKET_BLOCK_NR
+WBRIDGE_TPACKET_POLL_TIMEOUT_MS=$WB_TPACKET_POLL_TIMEOUT_MS
 # cpufreq (eco: conservative, thermal: powersave)
 WBRIDGE_CPUFREQ_PREV_GOVERNOR=$PREV_GOVERNOR
 EOF
@@ -408,6 +428,9 @@ log_info "  WBRIDGE_TIMEOUT_MS=$WB_TIMEOUT_MS"
 log_info "  WBRIDGE_RT_PRIORITY=$WB_RT_PRIORITY"
 log_info "  WBRIDGE_PCAP_BUFFER=$WB_PCAP_BUFFER"
 log_info "  WBRIDGE_TPACKET_RETIRE_TOV=$WB_TPACKET_RETIRE_TOV"
+log_info "  WBRIDGE_TPACKET_BLOCK_SIZE=$WB_TPACKET_BLOCK_SIZE"
+log_info "  WBRIDGE_TPACKET_BLOCK_NR=$WB_TPACKET_BLOCK_NR"
+log_info "  WBRIDGE_TPACKET_POLL_TIMEOUT_MS=$WB_TPACKET_POLL_TIMEOUT_MS"
 
 # ─── 결과 요약 ───
 log_info "=== 최적화 완료 [mode=$MODE, $MODE_DESC, bus=$BUS_TYPE] ==="

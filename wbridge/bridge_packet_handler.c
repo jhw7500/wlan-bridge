@@ -147,7 +147,7 @@ void bridge_log_inject_error(struct bridge_context *ctx,
     if (count == 1 || (prev > 0 && now > prev)) {
         struct bridge_interface *iface = &ctx->interfaces[iface_idx];
         const char *err = pcap_geterr(iface->tx_handle);
-        syslog(LOG_ERR, "pcap_inject failed on if%d (%s): %s (errors: %lu)",
+        SLOG(LOG_ERR, "pcap_inject failed on if%d (%s): %s (errors: %lu)",
                iface_idx, iface->name, err ? err : "unknown", count);
         atomic_store(&last_log_time, now);
     }
@@ -173,7 +173,7 @@ void bridge_log_partial_inject(struct bridge_context *ctx,
 
     long prev = atomic_load(&last_log_time);
     if (count == 1 || (prev > 0 && now > prev)) {
-        syslog(LOG_ERR, "Partial inject on if%d: %d/%u bytes (count: %lu)",
+        SLOG(LOG_ERR, "Partial inject on if%d: %d/%u bytes (count: %lu)",
                iface_idx, injected, expected, count);
         atomic_store(&last_log_time, now);
     }

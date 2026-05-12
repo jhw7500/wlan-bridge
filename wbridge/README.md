@@ -1,420 +1,81 @@
-# Refactored wlan-bridge Implementation
+# wbridge
 
-**Status**: 🚧 Reference Implementation (Not Production-Ready)
-**Purpose**: Demonstrate clean code architecture and testing practices
+i.MX8MM / i.MX93 + NXP 88W9098 (PCIe/SDIO) 환경의 user-space L2 bridge.
 
----
+두 가지 엔진을 제공하며 `wifi_init_conf.json` 의 `wbridge.engine` 으로 선택한다.
 
-## Overview
+| 바이너리 | 엔진 | 의존성 | 특징 |
+|---|---|---|---|
+| `wbridge` | libpcap | `libpcap`, `pthread` | 표준 도구 호환, 디버깅 우수, jitter 안정 |
+| `wbridge-tpacket` | AF_PACKET + TPACKET_V3 | `pthread` | RX zero-copy mmap, 발열·idle latency 튜닝 가능 |
 
-This directory contains a **refactored version** of the `dumb.c` L2 bridge that demonstrates:
+> 운영 default 엔진은 NXP moal 드라이버의 kernel-level bridge (`engine=moal`).
+> wbridge / wbridge-tpacket 은 정책 적용·측정·폴백 경로에서 사용한다.
 
-- ✅ **Modular architecture** - Separation of concerns into focused modules
-- ✅ **Unit testability** - Comprehensive test coverage (>80% target)
-- ✅ **Type safety** - Strong typing with enums and structured types
-- ✅ **Clean code** - Small functions (<50 lines), low complexity
-- ✅ **Maintainability** - Easy to understand, modify, and extend
-
----
-
-## What Changed?
-
-### Before: Monolithic `dumb.c`
+## 모듈 구조
 
 ```
-dumb.c (808 lines)
-├── main()        229 lines, complexity 25  ❌ Too complex
-├── ph()          139 lines, complexity 15  ❌ Too complex
-├── thr()          73 lines                 ⚠️  Borderline
-└── ... helpers
+main.c                   진입점, 시그널 핸들러, SIGUSR1 stats
+bridge.h/c               컨텍스트 생성/초기화/스레드 루프
+bridge_types.h           타입·enum·구조체 정의 (VLAN, packet_info, config, stats)
+config.h/c               env / argv 파싱 + clamp
+filter.h/c               MAC / IP / ARP 필터, 멀티캐스트 정책
+packet.h/c               802.1Q VLAN 파싱, packet_info 생성
+bridge_packet_handler.c  parse → filter → inject 오케스트레이션
+stats.h/c                per-interface atomic stats + SIGUSR1 reporter
+wbridge-tpacket.c        TPACKET_V3 단독 구현 (단일 파일)
+tests/test_filter.c      filter 단위 테스트 (host gcc)
+wifi_bridge@.service     systemd unit (mlan0/mlan1 인스턴스)
 ```
 
-**Problems**:
-- Hard to test (no unit tests possible)
-- Hard to understand (too much in one function)
-- Hard to modify (changing one thing breaks others)
+## 빌드
 
-### After: Modular Architecture
-
-```
-refactored/
-├── bridge_types.h        Type definitions, enums
-├── packet.h/c            Packet parsing (80 lines)
-├── filter.h/c            Filtering logic (200 lines)
-├── bridge_packet_handler.c  Main handler (150 lines)
-└── tests/
-    └── test_filter.c     Comprehensive unit tests
-```
-
-**Benefits**:
-- ✅ Each module < 200 lines
-- ✅ Each function < 50 lines
-- ✅ Complexity < 10 per function
-- ✅ 100% unit testable
-
----
-
-## Architecture
-
-### Module Responsibilities
-
-| Module | Lines | Complexity | Responsibility |
-|--------|-------|------------|----------------|
-| `bridge_types.h` | ~200 | N/A | Type definitions, enums |
-| `packet.c` | ~80 | Low | Parse raw packets into structs |
-| `filter.c` | ~200 | Medium | MAC/IP/ARP filtering logic |
-| `bridge_packet_handler.c` | ~150 | Low | Orchestrate parse→filter→forward |
-| `test_filter.c` | ~350 | N/A | Unit tests (8 test cases) |
-
-### Data Flow
-
-```
-1. Packet arrives
-   ↓
-2. packet_parse()          Extract Ethernet, VLAN, IP headers
-   ↓
-3. filter_should_drop()    Check MAC/IP/ARP filters
-   ↓
-4. bridge_packet_forward() Inject to peer interface
-   ↓
-5. Update statistics
-```
-
----
-
-## Key Improvements
-
-### 1. Type Safety
-
-**Before**:
-```c
-unsigned int i = ...;
-unsigned int peer = i ^ 1;  // What does this mean?
-```
-
-**After**:
-```c
-bridge_interface_t iface = BRIDGE_IF0;
-bridge_interface_t peer = bridge_peer(iface);  // Clear intent
-```
-
-### 2. Testability
-
-**Before**:
-```c
-// ph() function: 139 lines, untestable
-static void ph(...) {
-    // Mix of parsing, filtering, forwarding
-    // Cannot test in isolation
-}
-```
-
-**After**:
-```c
-// Separate testable functions
-int packet_parse(...);           // TEST: Parse VLAN tags
-int filter_should_drop(...);     // TEST: Filter logic
-int bridge_packet_forward(...);  // TEST: Forwarding
-
-// See tests/test_filter.c for examples
-```
-
-### 3. Complexity Reduction
-
-**Before**:
-```c
-// ph() function: Cyclomatic complexity 15
-void ph(...) {
-    if (hdr && data) {
-        if (hdr->caplen >= sizeof(...)) {
-            const struct ethhdr *eth = ...;
-            if (eth->h_dest[0] & 0x01) {
-                if (cfg.enable_ip_filter && ethertype == ETH_P_ARP) {
-                    if (hdr->caplen >= ...) {
-                        // 5 levels of nesting!
-                    }
-                }
-            }
-        }
-    }
-}
-```
-
-**After**:
-```c
-// bridge_packet_handler(): Complexity 3
-void bridge_packet_handler(...) {
-    if (packet_parse(hdr, data, &pkt) < 0) return;
-    if (filter_should_drop(&filter, &pkt, iface)) return;
-    bridge_packet_forward(ctx, &pkt, peer);
-}
-```
-
-### 4. Single Responsibility Principle
-
-Each module has ONE job:
-
-- `packet.c` - Parse packets (no filtering logic)
-- `filter.c` - Filter packets (no parsing logic)
-- `bridge_packet_handler.c` - Orchestrate (delegates details)
-
----
-
-## Building and Testing
-
-### Build Unit Tests
+cross-build SDK 설치 후:
 
 ```bash
-cd refactored/
-make
+./make-for-imx8  release   # i.MX8MM (sysroot: fsl-imx-xwayland)
+./make-for-imx93 release   # i.MX93  (sysroot: fsl-imx-wayland)
 ```
 
-This creates:
-- `test_filter` - Unit test executable
+각 스크립트는 `BOARD_SUFFIX=_imx8` 또는 `_imx93` 을 전달, 산출물은 `release/` 에 보드 suffix 붙여 공존:
 
-### Run Tests
+```
+release/wbridge_imx8         release/wbridge-tpacket_imx8
+release/wbridge_imx93        release/wbridge-tpacket_imx93
+release/obj_imx8/            release/obj_imx93/
+```
+
+host-native (보드에서 직접 빌드):
 
 ```bash
-make test
+make release       # release/wbridge, release/wbridge-tpacket
+make tests         # host용 단위 테스트
+make run-tests     # 테스트 실행
 ```
 
-Expected output:
-```
-========================================
-  Packet Filter Unit Tests
-========================================
+## 환경변수 (요약)
 
-TEST: Multicast packets should always forward
-  ✓ PASS
-TEST: MAC filter should drop packets to self MAC
-  ✓ PASS
-TEST: MAC filter should drop packets to peer MAC
-  ✓ PASS
-TEST: MAC filter should forward packets to other MAC
-  ✓ PASS
-TEST: IP filter should drop packets to local IP
-  ✓ PASS
-TEST: IP filter should forward packets to remote IP
-  ✓ PASS
-TEST: IP filter should forward IPv4 multicast
-  ✓ PASS
-TEST: With filters disabled, forward all unicast
-  ✓ PASS
+자세한 표는 [`../docs/optimization-modes.md`](../docs/optimization-modes.md) 참조.
 
-========================================
-  All tests PASSED ✓
-========================================
-```
+| 카테고리 | 변수 |
+|---|---|
+| Profile 메타 | `WBRIDGE_PROFILE_VERSION`, `WBRIDGE_MODE_REQUESTED`, `WBRIDGE_PROFILE_EFFECTIVE`, `WBRIDGE_THERMAL_STATE`, `WBRIDGE_MODE_FORCE` |
+| 공통 런타임 | `WBRIDGE_AFFINITY`, `WBRIDGE_RT`, `WBRIDGE_RT_PRIORITY`, `WBRIDGE_MLOCK`, `WBRIDGE_PROMISC` |
+| pcap 엔진 | `WBRIDGE_DISPATCH_BUDGET`, `WBRIDGE_IMMEDIATE`, `WBRIDGE_TIMEOUT_MS`, `WBRIDGE_PCAP_BUFFER`, `WBRIDGE_SNAPLEN` |
+| tpacket 엔진 | `WBRIDGE_TPACKET_RETIRE_TOV`, `WBRIDGE_TPACKET_BLOCK_SIZE`, `WBRIDGE_TPACKET_BLOCK_NR`, `WBRIDGE_TPACKET_POLL_TIMEOUT_MS` |
+| 필터 | `WBRIDGE_MAC_FILTER`, `WBRIDGE_IP_FILTER`, `WBRIDGE_DEBUG` |
 
----
+## 단위 테스트
 
-## Code Quality Metrics
-
-### Complexity Comparison
-
-| Metric | Before (dumb.c) | After (refactored) | Improvement |
-|--------|-----------------|-------------------|-------------|
-| Longest function | 229 lines | 50 lines | ✅ 78% reduction |
-| Max complexity | 25 | 10 | ✅ 60% reduction |
-| Test coverage | 0% | >80% | ✅ Testable |
-| Module count | 1 | 5 | ✅ Modular |
-
-### SOLID Principles Compliance
-
-- ✅ **Single Responsibility** - Each module has one job
-- ✅ **Open/Closed** - Easy to extend filters without modifying core
-- ✅ **Liskov Substitution** - Type-safe interfaces
-- ✅ **Interface Segregation** - Small, focused headers
-- ✅ **Dependency Inversion** - Depends on abstractions (struct packet_info)
-
----
-
-## Testing Strategy
-
-### Unit Tests (Implemented)
-
-See `tests/test_filter.c` for examples:
-
-```c
-void test_mac_filter_drops_self_mac() {
-    // Setup
-    struct bridge_config cfg = create_test_config(1, 0);
-    struct bridge_interface ifaces[2];
-    setup_test_interface(&ifaces[0], "eth0", mac0, NULL);
-
-    // Create test packet
-    struct packet_info pkt;
-    create_test_packet_mac(&pkt, mac0, 0);
-
-    // Assert
-    assert(filter_should_drop(&filter, &pkt, BRIDGE_IF0) == 1);
-}
-```
-
-### Integration Tests (TODO)
+`tests/test_filter.c` — host gcc 로 컴파일되어 host에서 실행. filter 모듈의 multicast/MAC/IP/ARP 필터 동작 검증.
 
 ```bash
-# tests/integration/test_basic_bridge.sh
-#!/bin/bash
-
-# Create veth pairs
-ip link add veth0 type veth peer name veth0-peer
-ip link add veth1 type veth peer name veth1-peer
-
-# Run bridge
-./dumb-refactored veth0 veth1 &
-
-# Send test packets
-tcpreplay --intf1=veth0-peer test_packets.pcap
-
-# Verify forwarding
-tcpdump -i veth1-peer -c 10 -w received.pcap
-
-# Cleanup
-killall dumb-refactored
-ip link delete veth0
-ip link delete veth1
+make run-tests
 ```
 
----
+## 관련 문서
 
-## Migration Path
-
-This refactored code is a **reference implementation** demonstrating best practices. To use in production:
-
-### Phase 1: Validate (1-2 weeks)
-- [ ] Complete all TODO items in the code
-- [ ] Add missing modules (config, stats, thread, main)
-- [ ] Achieve 80%+ test coverage
-- [ ] Performance benchmark vs original
-
-### Phase 2: Integration Test (1 week)
-- [ ] Build complete refactored binary
-- [ ] Test on i.MX8MM hardware
-- [ ] Verify performance (should match original)
-- [ ] Stress test with high packet rates
-
-### Phase 3: Production Trial (2 weeks)
-- [ ] Deploy alongside original (A/B test)
-- [ ] Monitor for regressions
-- [ ] Collect performance metrics
-- [ ] Gradual rollout if stable
-
-### Phase 4: Replace Original (1 week)
-- [ ] Switch default to refactored version
-- [ ] Keep original as `dumb-legacy`
-- [ ] Update documentation
-- [ ] Archive old code
-
-**Total Estimated Time**: 5-6 weeks
-
----
-
-## Known Limitations
-
-This is a **partial implementation** focusing on the most complex parts:
-
-### ✅ Implemented
-- Type definitions (`bridge_types.h`)
-- Packet parsing (`packet.c`)
-- Filtering logic (`filter.c`)
-- Packet handler (`bridge_packet_handler.c`)
-- Unit tests (`test_filter.c`)
-
-### ❌ Not Yet Implemented
-- Configuration parsing (`config.c`) - Still uses global
-- Statistics tracking (`stats.c`) - Still uses global
-- Thread management (`bridge_thread.c`) - Still uses original
-- Main entry point (`main.c`) - Still uses original
-- Pcap initialization (`pcap_utils.c`) - Still uses original
-- Integration tests
-
-### 🔧 TODO Items in Code
-- [ ] Implement `struct bridge_context` (currently extern)
-- [ ] Add `bridge_context_create()` and `bridge_context_destroy()`
-- [ ] Extract global state into context
-- [ ] Add integration test framework
-- [ ] Performance profiling and optimization
-
----
-
-## Performance Considerations
-
-### Zero-Copy Design Preserved
-
-The refactored code maintains the **zero-copy** forwarding path:
-
-```c
-// Original: pcap_inject(ifs.tx[peer], data, hdr->caplen)
-// Refactored: pcap_inject(iface->tx_handle, pkt->data, pkt->caplen)
-//             ^^^^^^^^^ Same underlying call, zero copy
-```
-
-### Modularization Overhead
-
-**Q**: Does splitting into functions add overhead?
-
-**A**: Negligible. Modern compilers inline small functions:
-
-```bash
-# Compile with optimizations
-gcc -O2 -flto ...
-
-# Compiler will inline:
-- packet_parse() if called once
-- filter_should_drop() in hot path
-- bridge_peer() (already static inline)
-```
-
-**Measured Impact**: <1% performance difference (within noise)
-
----
-
-## Contributing
-
-This is a **reference implementation** for educational purposes. If you want to contribute:
-
-1. Add more unit tests (`tests/test_*.c`)
-2. Implement missing modules (see TODO above)
-3. Add integration tests
-4. Improve documentation
-5. Performance profiling
-
----
-
-## References
-
-### Original Code
-- `../dumb.c` - Production version (808 lines)
-- `../archive/` - Historical versions
-
-### Documentation
-- `../../docs/VLAN-SUPPORT.md` - VLAN implementation details
-- `../../CLAUDE.md` - Project overview
-- `../REFACTORING_ANALYSIS.md` - Detailed refactoring analysis
-
-### Related Projects
-- [libpcap](https://www.tcpdump.org/) - Packet capture library
-- [Linux bridge](https://wiki.linuxfoundation.org/networking/bridge) - Kernel L2 bridge
-
----
-
-## License
-
-Same as parent project (see `../../LICENSE` if exists)
-
----
-
-## Questions?
-
-See `REFACTORING_ANALYSIS.md` for:
-- Detailed metrics analysis
-- Before/after comparisons
-- Complete refactoring roadmap
-- Risk assessment
-- Migration strategy
-
----
-
-**Status**: 🚧 Reference Implementation
-**Next Steps**: Complete missing modules, add integration tests, performance validation
+- `../docs/optimization-modes.md` — 4가지 모드(latency/normal/eco/thermal) 파라미터, JSON SSoT 구조
+- `../docs/driver-options.md` — NXP moal + sysctl + DVFS/ASPM
+- `../docs/VLAN-SUPPORT.md` — 802.1Q VLAN 파싱 / IP+MAC 필터
+- `../docs/wbridge-smoke-test-checklist.md` — 배포 후 스모크 테스트 항목

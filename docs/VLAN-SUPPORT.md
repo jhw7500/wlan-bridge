@@ -46,7 +46,7 @@ In enterprise/industrial environments, network controllers often use VLAN taggin
 
 ### Components Added
 
-#### 1. VLAN Header Structure (dumb.c:25-29)
+#### 1. VLAN Header Structure (`bridge_types.h`)
 
 ```c
 // 802.1Q VLAN header structure
@@ -56,7 +56,7 @@ struct vlan_hdr {
 } __attribute__((packed));
 ```
 
-#### 2. VLAN Parsing Logic (dumb.c:303-314)
+#### 2. VLAN Parsing Logic (`packet.c`)
 
 The packet handler (`ph()` function) now:
 1. Reads the EtherType from the Ethernet header
@@ -79,7 +79,7 @@ if (ethertype == ETH_P_8021Q && hdr->caplen >= header_len + sizeof(struct vlan_h
 }
 ```
 
-#### 3. Enhanced IP Filter (dumb.c:336-354)
+#### 3. Enhanced IP Filter (`filter.c`)
 
 The IP filter now uses the parsed EtherType and payload pointer:
 
@@ -95,7 +95,7 @@ if (cfg.enable_ip_filter && ethertype == ETH_P_IP) {
 }
 ```
 
-#### 4. IP + MAC Validation (dumb.c:283-295)
+#### 4. IP + MAC Validation (`filter.c`, `bridge.c`)
 
 For accurate filtering, the bridge now checks both IP and MAC addresses:
 
@@ -226,25 +226,25 @@ VLAN 110: OHT Working Network ← Bridge operates here
 
 ```bash
 # Enable IP filter (automatically handles VLAN tags)
-sudo ./dumb --ip-filter eth0 mlan0
+sudo ./wbridge --ip-filter eth0 mlan0
 
 # Enable MAC filter (recommended for loop prevention)
-sudo ./dumb --mac-filter eth0 mlan0
+sudo ./wbridge --mac-filter eth0 mlan0
 
 # Enable both (recommended for VLAN environments)
-sudo ./dumb --ip-filter --mac-filter eth0 mlan0
+sudo ./wbridge --ip-filter --mac-filter eth0 mlan0
 
 # Disable debug logging in production
-sudo ./dumb --ip-filter --mac-filter --no-debug eth0 mlan0
+sudo ./wbridge --ip-filter --mac-filter --no-debug eth0 mlan0
 ```
 
 ### Environment Variables
 
 ```bash
 # Enable IP filter via environment variable
-export DUMB_IP_FILTER=1
-export DUMB_MAC_FILTER=1
-sudo ./dumb eth0 mlan0
+export WBRIDGE_IP_FILTER=1
+export WBRIDGE_MAC_FILTER=1
+sudo ./wbridge eth0 mlan0
 ```
 
 ### Verifying VLAN Tags
@@ -267,10 +267,10 @@ sudo tcpdump -i mlan0 -e -n -c 10 -vv
 
 ```bash
 # Run bridge with debug logging
-sudo ./dumb --ip-filter --mac-filter eth0 mlan0
+sudo ./wbridge --ip-filter --mac-filter eth0 mlan0
 
 # In another terminal, monitor syslog
-sudo tail -f /var/log/syslog | grep dumb-bridge
+sudo tail -f /var/log/syslog | grep wbridge
 
 # Look for:
 # ip-filter: skipped dst_ip=192.168.11.11 dst_mac=aa:bb:cc:dd:ee:ff (hits=123)
@@ -304,7 +304,7 @@ sudo tail -f /var/log/syslog | grep dumb-bridge
 3. **IP filter disabled**
    ```bash
    # Ensure --ip-filter flag is set
-   ps aux | grep dumb
+   ps aux | grep wbridge
    ```
 
 ### Issue: OHT Not Receiving Packets
@@ -339,7 +339,7 @@ sudo tcpdump -i eth0 -e -n -c 5 -vv
 **Solution:**
 ```bash
 # Disable debug logging
-sudo ./dumb --ip-filter --mac-filter --no-debug eth0 mlan0
+sudo ./wbridge --ip-filter --mac-filter --no-debug eth0 mlan0
 ```
 
 ---

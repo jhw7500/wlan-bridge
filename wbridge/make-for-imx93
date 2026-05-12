@@ -1,14 +1,20 @@
 #!/bin/bash
-# i.MX8 크로스 컴파일을 위한 리팩토링 버전 빌드 스크립트
+# i.MX93 크로스 컴파일을 위한 리팩토링 버전 빌드 스크립트
+#
+# imx8 (fsl-imx-xwayland) vs imx93 (fsl-imx-wayland) — SDK 경로가 다르다.
+# wbridge는 user-space 바이너리(libpcap + pthread) 만이라 KERNELDIR 불필요.
+# 산출물 디렉토리는 release/, debug/ 공통. 바이너리 이름에 보드 suffix를
+# 붙여 imx8 ↔ imx93 동시 보관 가능 (wbridge_imx93, wbridge-tpacket_imx93).
+# 보드 전환 시 .o 충돌 방지 위해 `make clean` 권장.
 
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
-# SDK 경로 설정
+# SDK 경로 설정 (i.MX93은 fsl-imx-wayland)
 if [ -z "${SDK_LOC:-}" ]; then
-    if [ -e "/shared/fsl-imx-xwayland/6.6-nanbield/environment-setup-armv8a-poky-linux" ]; then
-        SDK_LOC=/shared/fsl-imx-xwayland/6.6-nanbield
+    if [ -e "/shared/fsl-imx-wayland/6.6-nanbield/environment-setup-armv8a-poky-linux" ]; then
+        SDK_LOC=/shared/fsl-imx-wayland/6.6-nanbield
     else
         SDK_LOC="$SCRIPT_DIR"
     fi
@@ -30,13 +36,10 @@ export PKG_CONFIG_SYSROOT_DIR="$SYSROOT"
 export PKG_CONFIG_PATH="$SYSROOT/usr/lib/pkgconfig:$SYSROOT/usr/share/pkgconfig"
 export PKG_CONFIG_LIBDIR="$SYSROOT/usr/lib/pkgconfig:$SYSROOT/usr/share/pkgconfig"
 
-# 산출물 디렉토리는 release/, debug/ 공통. 바이너리 이름에 보드 suffix 부여하여
-# imx8 ↔ imx93 동시 보관 가능 (wbridge_imx8, wbridge-tpacket_imx8 등).
-# 보드 전환 시 .o 충돌 방지 위해 `make clean` 권장.
 make \
     CC="$CC" \
     CFLAGS="${CFLAGS:-} -I." \
     RELEASE_CFLAGS="${CFLAGS:-} -flto -I." \
     LDFLAGS="${LDFLAGS:-} -lpcap -pthread" \
-    BOARD_SUFFIX="${BOARD_SUFFIX:-_imx8}" \
+    BOARD_SUFFIX="${BOARD_SUFFIX:-_imx93}" \
     "$@"
