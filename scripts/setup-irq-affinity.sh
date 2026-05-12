@@ -307,46 +307,93 @@ else
 fi
 
 # ─── 3. Ring Buffer (공통) ───
+# 각 인터페이스의 ring/coalesce/offload 적용 결과를 ETH/WLAN별로 캡쳐하여
+# /run/wbridge.env + /run/wbridge.apply.json 에 노출 (운용 가시성).
+# mlan0(SDIO 88W9098)은 woal_netdev_ops에 ethtool_ops 미등록이라 unsupported로 찍힘.
 log_info "[3/5] Ring Buffer"
 
+ETHTOOL_RING_ETH="unknown"
+ETHTOOL_RING_WLAN="unknown"
 if command -v ethtool &> /dev/null; then
-    ethtool -G $ETH_IF rx 4096 tx 4096 2>/dev/null && \
-        log_info "  $ETH_IF → rx:4096 tx:4096" || \
-        log_warn "  $ETH_IF ring buffer 미지원"
-    ethtool -G $WLAN_IF rx 4096 tx 4096 2>/dev/null && \
-        log_info "  $WLAN_IF → rx:4096 tx:4096" || \
-        log_warn "  $WLAN_IF ring buffer 미지원"
+    for IF in "$ETH_IF" "$WLAN_IF"; do
+        if ethtool -G "$IF" rx 4096 tx 4096 2>/dev/null; then
+            log_info "  $IF → rx:4096 tx:4096"
+            _result="supported"
+        else
+            log_warn "  $IF ring buffer 미지원"
+            _result="unsupported"
+        fi
+        if [ "$IF" = "$ETH_IF" ]; then
+            ETHTOOL_RING_ETH="$_result"
+        else
+            ETHTOOL_RING_WLAN="$_result"
+        fi
+    done
 else
     log_warn "  ethtool 미설치"
+    ETHTOOL_RING_ETH="no_ethtool"
+    ETHTOOL_RING_WLAN="no_ethtool"
 fi
 
 # ─── 4. Interrupt Coalescing (모드별) ───
 log_info "[4/5] Interrupt Coalescing [${MODE}]"
 
+ETHTOOL_COALESCE_ETH="unknown"
+ETHTOOL_COALESCE_WLAN="unknown"
 if command -v ethtool &> /dev/null; then
-    for IF in $ETH_IF $WLAN_IF; do
+    for IF in "$ETH_IF" "$WLAN_IF"; do
         if [ $RX_USECS -eq 0 ]; then
-            ethtool -C $IF rx-usecs 0 rx-frames 1 2>/dev/null && \
-                log_info "  $IF → 즉시 처리 (rx-usecs=0, rx-frames=1)" || \
+            if ethtool -C "$IF" rx-usecs 0 rx-frames 1 2>/dev/null; then
+                log_info "  $IF → 즉시 처리 (rx-usecs=0, rx-frames=1)"
+                _result="supported"
+            else
                 log_warn "  $IF coalescing 미지원"
+                _result="unsupported"
+            fi
         else
-            ethtool -C $IF rx-usecs $RX_USECS tx-usecs $TX_USECS rx-frames $RX_FRAMES 2>/dev/null && \
-                log_info "  $IF → 병합 (rx-usecs=$RX_USECS, rx-frames=$RX_FRAMES)" || \
+            if ethtool -C "$IF" rx-usecs $RX_USECS tx-usecs $TX_USECS rx-frames $RX_FRAMES 2>/dev/null; then
+                log_info "  $IF → 병합 (rx-usecs=$RX_USECS, rx-frames=$RX_FRAMES)"
+                _result="supported"
+            else
                 log_warn "  $IF coalescing 미지원"
+                _result="unsupported"
+            fi
+        fi
+        if [ "$IF" = "$ETH_IF" ]; then
+            ETHTOOL_COALESCE_ETH="$_result"
+        else
+            ETHTOOL_COALESCE_WLAN="$_result"
         fi
     done
+else
+    ETHTOOL_COALESCE_ETH="no_ethtool"
+    ETHTOOL_COALESCE_WLAN="no_ethtool"
 fi
 
 # ─── 5. 오프로드 설정 (모드별) ───
 log_info "[5/5] 오프로드 [${MODE}]"
 
+ETHTOOL_OFFLOAD_ETH="unknown"
+ETHTOOL_OFFLOAD_WLAN="unknown"
 if command -v ethtool &> /dev/null; then
-    for IF in $ETH_IF $WLAN_IF; do
-        ethtool -K $IF gro $GRO gso $GSO tso $TSO 2>/dev/null && \
-            log_info "  $IF → GRO=$GRO GSO=$GSO TSO=$TSO" || \
+    for IF in "$ETH_IF" "$WLAN_IF"; do
+        if ethtool -K "$IF" gro $GRO gso $GSO tso $TSO 2>/dev/null; then
+            log_info "  $IF → GRO=$GRO GSO=$GSO TSO=$TSO"
+            _result="supported"
+        else
             log_warn "  $IF 오프로드 설정 실패"
-        ethtool -K $IF rx on tx on 2>/dev/null || true
+            _result="unsupported"
+        fi
+        ethtool -K "$IF" rx on tx on 2>/dev/null || true
+        if [ "$IF" = "$ETH_IF" ]; then
+            ETHTOOL_OFFLOAD_ETH="$_result"
+        else
+            ETHTOOL_OFFLOAD_WLAN="$_result"
+        fi
     done
+else
+    ETHTOOL_OFFLOAD_ETH="no_ethtool"
+    ETHTOOL_OFFLOAD_WLAN="no_ethtool"
 fi
 
 # ─── cpufreq governor (eco/thermal 전용) ───
@@ -413,6 +460,13 @@ WBRIDGE_TPACKET_RETIRE_TOV=$WB_TPACKET_RETIRE_TOV
 WBRIDGE_TPACKET_BLOCK_SIZE=$WB_TPACKET_BLOCK_SIZE
 WBRIDGE_TPACKET_BLOCK_NR=$WB_TPACKET_BLOCK_NR
 WBRIDGE_TPACKET_POLL_TIMEOUT_MS=$WB_TPACKET_POLL_TIMEOUT_MS
+# ethtool 지원여부 (운용 가시성 — apply.json 노출용)
+WBRIDGE_ETHTOOL_COALESCE_ETH=$ETHTOOL_COALESCE_ETH
+WBRIDGE_ETHTOOL_COALESCE_WLAN=$ETHTOOL_COALESCE_WLAN
+WBRIDGE_ETHTOOL_RING_ETH=$ETHTOOL_RING_ETH
+WBRIDGE_ETHTOOL_RING_WLAN=$ETHTOOL_RING_WLAN
+WBRIDGE_ETHTOOL_OFFLOAD_ETH=$ETHTOOL_OFFLOAD_ETH
+WBRIDGE_ETHTOOL_OFFLOAD_WLAN=$ETHTOOL_OFFLOAD_WLAN
 # cpufreq (eco: conservative, thermal: powersave)
 WBRIDGE_CPUFREQ_PREV_GOVERNOR=$PREV_GOVERNOR
 EOF
@@ -431,6 +485,9 @@ log_info "  WBRIDGE_TPACKET_RETIRE_TOV=$WB_TPACKET_RETIRE_TOV"
 log_info "  WBRIDGE_TPACKET_BLOCK_SIZE=$WB_TPACKET_BLOCK_SIZE"
 log_info "  WBRIDGE_TPACKET_BLOCK_NR=$WB_TPACKET_BLOCK_NR"
 log_info "  WBRIDGE_TPACKET_POLL_TIMEOUT_MS=$WB_TPACKET_POLL_TIMEOUT_MS"
+log_info "  WBRIDGE_ETHTOOL_COALESCE: eth=$ETHTOOL_COALESCE_ETH wlan=$ETHTOOL_COALESCE_WLAN"
+log_info "  WBRIDGE_ETHTOOL_RING:     eth=$ETHTOOL_RING_ETH wlan=$ETHTOOL_RING_WLAN"
+log_info "  WBRIDGE_ETHTOOL_OFFLOAD:  eth=$ETHTOOL_OFFLOAD_ETH wlan=$ETHTOOL_OFFLOAD_WLAN"
 
 # ─── 결과 요약 ───
 log_info "=== 최적화 완료 [mode=$MODE, $MODE_DESC, bus=$BUS_TYPE] ==="
