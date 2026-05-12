@@ -146,7 +146,10 @@ case "$MODE" in
     thermal)
         MODE_DESC="발열 최소화"
         RX_USECS=150; TX_USECS=150; RX_FRAMES=10
-        GRO=on;       GSO=off;      TSO=off
+        # GRO off: mlan0(SDIO 88W9098) ndo_set_features 미등록 → mlan0 측 효과 0,
+        # eth0(FEC)에서 GRO 머지 비활성으로 작은 패킷 head latency ↓ + bridge 포워딩
+        # 머지/재분할 비용 회피. 4모드 일관화 (latency가 이미 off).
+        GRO=off;      GSO=off;      TSO=off
         # wbridge-pcap 환경변수
         WB_DISPATCH_BUDGET=128
         WB_IMMEDIATE=0
@@ -163,7 +166,7 @@ case "$MODE" in
     eco)
         MODE_DESC="저전력 (온도 저감)"
         RX_USECS=100; TX_USECS=100; RX_FRAMES=6
-        GRO=on;       GSO=off;      TSO=off
+        GRO=off;      GSO=off;      TSO=off
         # wbridge-pcap 환경변수
         WB_DISPATCH_BUDGET=96
         WB_IMMEDIATE=0
@@ -180,7 +183,7 @@ case "$MODE" in
     normal)
         MODE_DESC="균형 (일반)"
         RX_USECS=50;  TX_USECS=50;  RX_FRAMES=4
-        GRO=on;       GSO=off;      TSO=off
+        GRO=off;      GSO=off;      TSO=off
         # wbridge-pcap 환경변수 (기본값)
         WB_DISPATCH_BUDGET=64
         WB_IMMEDIATE=1
