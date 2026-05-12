@@ -320,17 +320,33 @@ fi
 # 각 인터페이스의 ring/coalesce/offload 적용 결과를 ETH/WLAN별로 캡쳐하여
 # /run/wbridge.env + /run/wbridge.apply.json 에 노출 (운용 가시성).
 # mlan0(SDIO 88W9098)은 woal_netdev_ops에 ethtool_ops 미등록이라 unsupported로 찍힘.
+# RX/TX는 hardware Pre-set maximum을 ethtool -g로 감지하여 clamp
+# (예: imx93 stmmac max=1024 → 4096 요청 시 거부됨 → max로 clamp).
 log_info "[3/5] Ring Buffer"
 
+# Pre-set maximums 섹션에서 RX 또는 TX 최대값 추출. 미지원 시 빈 문자열.
+get_ring_max() {
+    local IF=$1 dir=$2
+    ethtool -g "$IF" 2>/dev/null | \
+        awk -v d="${dir}:" '/Pre-set maximums/{f=1; next} /Current hardware/{f=0} f && $1==d {print $2; exit}'
+}
+
+TARGET_RING=4096
 ETHTOOL_RING_ETH="unknown"
 ETHTOOL_RING_WLAN="unknown"
 if command -v ethtool &> /dev/null; then
     for IF in "$ETH_IF" "$WLAN_IF"; do
-        if ethtool -G "$IF" rx 4096 tx 4096 2>/dev/null; then
-            log_info "  $IF → rx:4096 tx:4096"
+        _max_rx=$(get_ring_max "$IF" RX)
+        _max_tx=$(get_ring_max "$IF" TX)
+        _rx=$TARGET_RING
+        _tx=$TARGET_RING
+        if [[ "$_max_rx" =~ ^[0-9]+$ ]] && [ "$_max_rx" -lt "$_rx" ]; then _rx=$_max_rx; fi
+        if [[ "$_max_tx" =~ ^[0-9]+$ ]] && [ "$_max_tx" -lt "$_tx" ]; then _tx=$_max_tx; fi
+        if ethtool -G "$IF" rx "$_rx" tx "$_tx" 2>/dev/null; then
+            log_info "  $IF → rx:$_rx tx:$_tx (hw max rx:${_max_rx:-?} tx:${_max_tx:-?})"
             _result="supported"
         else
-            log_warn "  $IF ring buffer 미지원"
+            log_warn "  $IF ring buffer 미지원 (max rx:${_max_rx:-?} tx:${_max_tx:-?})"
             _result="unsupported"
         fi
         if [ "$IF" = "$ETH_IF" ]; then
