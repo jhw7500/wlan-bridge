@@ -422,10 +422,20 @@ else
     ETHTOOL_OFFLOAD_WLAN="no_ethtool"
 fi
 
+# ─── cpufreq 지원 여부 감지 (모드 무관, 운용 가시성) ───
+# imx93은 mainline/NXP downstream 양쪽 모두 DT에 operating-points-v2 노드
+# 미정의 → cpufreq DT driver probe 실패 → /sys/.../cpufreq/scaling_governor
+# 부재. eco/thermal 모드 governor 정책이 no-op. cpuidle deep state만 작동.
+if [ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]; then
+    CPUFREQ_SUPPORTED="yes"
+else
+    CPUFREQ_SUPPORTED="no"
+fi
+
 # ─── cpufreq governor (eco/thermal 전용) ───
 PREV_GOVERNOR="unchanged"
 if [ "$MODE" = "eco" ] || [ "$MODE" = "thermal" ]; then
-    if [ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]; then
+    if [ "$CPUFREQ_SUPPORTED" = "yes" ]; then
         PREV_GOVERNOR=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo "unknown")
         if [ "$MODE" = "eco" ]; then
             TARGET_GOVERNOR="conservative"
@@ -445,7 +455,7 @@ if [ "$MODE" = "eco" ] || [ "$MODE" = "thermal" ]; then
             log_info "[cpufreq] thermal: $PREV_GOVERNOR → powersave"
         fi
     else
-        log_warn "[cpufreq] scaling_governor 미지원"
+        log_warn "[cpufreq] 미지원 (DT에 operating-points-v2 노드 없음, imx93 등) — eco/thermal cpufreq 정책 skip, cpuidle deep state만 작동"
     fi
 fi
 
@@ -493,7 +503,8 @@ WBRIDGE_ETHTOOL_RING_ETH=$ETHTOOL_RING_ETH
 WBRIDGE_ETHTOOL_RING_WLAN=$ETHTOOL_RING_WLAN
 WBRIDGE_ETHTOOL_OFFLOAD_ETH=$ETHTOOL_OFFLOAD_ETH
 WBRIDGE_ETHTOOL_OFFLOAD_WLAN=$ETHTOOL_OFFLOAD_WLAN
-# cpufreq (eco: conservative, thermal: powersave)
+# cpufreq (eco: conservative, thermal: powersave; imx93 등 미지원 SoC에선 no-op)
+WBRIDGE_CPUFREQ_SUPPORTED=$CPUFREQ_SUPPORTED
 WBRIDGE_CPUFREQ_PREV_GOVERNOR=$PREV_GOVERNOR
 EOF
 
@@ -514,6 +525,7 @@ log_info "  WBRIDGE_TPACKET_POLL_TIMEOUT_MS=$WB_TPACKET_POLL_TIMEOUT_MS"
 log_info "  WBRIDGE_ETHTOOL_COALESCE: eth=$ETHTOOL_COALESCE_ETH wlan=$ETHTOOL_COALESCE_WLAN"
 log_info "  WBRIDGE_ETHTOOL_RING:     eth=$ETHTOOL_RING_ETH wlan=$ETHTOOL_RING_WLAN"
 log_info "  WBRIDGE_ETHTOOL_OFFLOAD:  eth=$ETHTOOL_OFFLOAD_ETH wlan=$ETHTOOL_OFFLOAD_WLAN"
+log_info "  WBRIDGE_CPUFREQ_SUPPORTED=$CPUFREQ_SUPPORTED"
 
 # ─── 결과 요약 ───
 log_info "=== 최적화 완료 [mode=$MODE, $MODE_DESC, bus=$BUS_TYPE] ==="
