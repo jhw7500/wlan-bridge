@@ -118,7 +118,7 @@ wbridge
 | `WBRIDGE_DISPATCH_BUDGET` | 64 | 64 | **96** | **128** | pcap_dispatch 1회당 최대 패킷 수 |
 | `WBRIDGE_IMMEDIATE` | 1 | 1 | **0** | **0** | pcap immediate mode (패킷 도착 즉시 전달) |
 | `WBRIDGE_TIMEOUT_MS` | 1 | 1 | **5** | **10** | pcap 폴링 타임아웃 (ms) |
-| `WBRIDGE_RT_PRIORITY` | **80** | 50 | **40** | **30** | SCHED_FIFO 우선순위 (1~99) |
+| `WBRIDGE_RT_PRIORITY` | **49** | **45** | **40** | **30** | SCHED_FIFO 우선순위 (1~99) |
 | `WBRIDGE_PCAP_BUFFER` | 4194304 | 4194304 | 4194304 | **8388608** | pcap RX 버퍼 크기 (bytes) |
 
 #### wbridge-tpacket용 (TPACKET_V3 기반)
@@ -129,7 +129,7 @@ wbridge
 | `WBRIDGE_TPACKET_BLOCK_SIZE` | **8192** | 16384 | **32768** | **65536** | RX ring block 크기 (bytes, page-aligned). 작을수록 idle stall 감소 |
 | `WBRIDGE_TPACKET_BLOCK_NR` | **32** | 64 | 64 | **128** | RX ring block 개수. burst 흡수용, latency 무관 |
 | `WBRIDGE_TPACKET_POLL_TIMEOUT_MS` | 1 | 1 | **0** | **0** | poll() timeout (ms). 0=auto(retire_tov×3). eco/thermal에서 빈 wake 회피 |
-| `WBRIDGE_RT_PRIORITY` | **80** | 50 | **40** | **30** | SCHED_FIFO 우선순위 (1~99) |
+| `WBRIDGE_RT_PRIORITY` | **49** | **45** | **40** | **30** | SCHED_FIFO 우선순위 (1~99) |
 
 > **참고:** TPACKET_V3 RX는 mmap zero-copy. 실시간성은 **block 크기 × retire_blk_tov**의 곱으로 결정됨 (block이 다 차거나 timeout 만료 시 user-space로 retire). `BLOCK_SIZE × BLOCK_NR`이 RX ring 총량으로, 작은 패킷의 idle traffic에서는 block이 안 차서 retire_tov 시간만큼 강제 stall 누적 → BLOCK_SIZE 축소가 latency 개선의 핵심 노브. TX_RING(TPACKET_V2)은 별도 매크로로 컴파일타임 고정(8MB).
 
@@ -143,7 +143,7 @@ wbridge
 | **IMMEDIATE=0** | - | timeout까지 대기 후 배치 반환 | CPU idle 확보 극대화 |
 | **TIMEOUT_MS=1** | 1ms마다 깨어남 → 빠른 반응 | - | - |
 | **TIMEOUT_MS=5/10** | - | eco: 5ms 간격 | thermal: 10ms → C-state 진입 가능 |
-| **RT_PRIORITY=80** | 높은 우선순위 → 선점 스케줄링 유리 | - | - |
+| **RT_PRIORITY=49** | 높은 우선순위 → 선점 스케줄링 유리 | - | - |
 | **RT_PRIORITY=40/30** | - | eco: 중간 | thermal: 낮음 → 스케줄러 부하 감소 |
 | **PCAP_BUFFER=8MB** | - | - | 병합으로 burst 도착 → 큰 버퍼로 드롭 방지 |
 | **cpufreq=conservative** | - | up=80/down=20, 필요할 때만 클럭 상승 | - |
@@ -181,7 +181,7 @@ sudo ./setup-irq-affinity.sh --mode latency eth0 mlan0
 WBRIDGE_DISPATCH_BUDGET=64 \
 WBRIDGE_IMMEDIATE=1 \
 WBRIDGE_TIMEOUT_MS=1 \
-WBRIDGE_RT_PRIORITY=80 \
+WBRIDGE_RT_PRIORITY=49 \
   wbridge eth0 mlan0
 ```
 
@@ -190,7 +190,7 @@ WBRIDGE_RT_PRIORITY=80 \
 - 패킷 도착 즉시 인터럽트 (rx-usecs=0)
 - pcap immediate mode ON (패킷 즉시 전달)
 - GRO OFF (패킷 병합 없이 개별 처리)
-- RT 우선순위 80 (공격적 선점)
+- RT 우선순위 49 (IRQ thread 50 바로 아래 — IRQ 양보, user-space RT 유지)
 - 최소 지연, 최대 발열
 
 ### normal 모드 (균형)
@@ -282,7 +282,7 @@ sudo ./setup-irq-affinity.sh --mode latency eth0 mlan0
 
 # wbridge 재시작
 systemctl stop wifi_bridge@mlan0
-WBRIDGE_IMMEDIATE=1 WBRIDGE_TIMEOUT_MS=1 WBRIDGE_RT_PRIORITY=80 \
+WBRIDGE_IMMEDIATE=1 WBRIDGE_TIMEOUT_MS=1 WBRIDGE_RT_PRIORITY=49 \
   systemctl start wifi_bridge@mlan0
 ```
 

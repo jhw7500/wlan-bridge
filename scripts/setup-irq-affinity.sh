@@ -134,7 +134,10 @@ case "$MODE" in
         WB_DISPATCH_BUDGET=64
         WB_IMMEDIATE=1
         WB_TIMEOUT_MS=1
-        WB_RT_PRIORITY=80
+        # RT 49: IRQ thread(mmc2/stmmac/moal_br_*)와 moal bridge worker가 모두
+        # RT=50이라 그 위 80이면 SDIO/eth IRQ thread preempt → 자기 자신 bottleneck.
+        # 49는 50 미만으로 IRQ에 양보하면서 user-space RT 성격은 유지.
+        WB_RT_PRIORITY=49
         WB_PCAP_BUFFER=4194304
         # wbridge-tpacket 환경변수
         # 작은 block(8KB) + 작은 ring(256KB) + poll=1ms로 idle stall 제거.
@@ -190,7 +193,9 @@ case "$MODE" in
         WB_DISPATCH_BUDGET=64
         WB_IMMEDIATE=1
         WB_TIMEOUT_MS=1
-        WB_RT_PRIORITY=50
+        # RT 45: IRQ thread/moal_br_* (RT=50)와 동등하지 않게 5단계 양보.
+        # latency(49) > normal(45) > eco(40) > thermal(30) 단조 시퀀스.
+        WB_RT_PRIORITY=45
         WB_PCAP_BUFFER=4194304
         # wbridge-tpacket 환경변수
         # 16KB block + 1MB ring + poll=1ms.
