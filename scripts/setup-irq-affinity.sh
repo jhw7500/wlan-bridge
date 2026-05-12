@@ -157,14 +157,15 @@ case "$MODE" in
         WB_RT_PRIORITY=30
         WB_PCAP_BUFFER=8388608
         # wbridge-tpacket 환경변수 (발열 최적화)
-        # 큰 block(64KB) + 큰 ring(8MB) + poll=10ms로 wakeup 최소.
+        # 큰 block(64KB) + 큰 ring(8MB), POLL=0(auto, retire_tov*3=30ms)로
+        # 빈 wake 최소화 → C-state 진입 시간 극대화.
         WB_TPACKET_RETIRE_TOV=10
         WB_TPACKET_BLOCK_SIZE=65536
         WB_TPACKET_BLOCK_NR=128
-        WB_TPACKET_POLL_TIMEOUT_MS=10
+        WB_TPACKET_POLL_TIMEOUT_MS=0
         ;;
     eco)
-        MODE_DESC="저전력 (온도 저감)"
+        MODE_DESC="저전력 (온도 저감 우선, 레이턴시 약간 양보)"
         RX_USECS=100; TX_USECS=100; RX_FRAMES=6
         GRO=off;      GSO=off;      TSO=off
         # wbridge-pcap 환경변수
@@ -174,11 +175,12 @@ case "$MODE" in
         WB_RT_PRIORITY=40
         WB_PCAP_BUFFER=4194304
         # wbridge-tpacket 환경변수
-        # 중간 block(32KB) + 2MB ring + poll=3ms.
+        # 중간 block(32KB) + 2MB ring, POLL=0(auto, retire_tov*3=15ms) →
+        # poll < retire로 인한 빈 wake 회피 (eco 발열 절감 의도 정합).
         WB_TPACKET_RETIRE_TOV=5
         WB_TPACKET_BLOCK_SIZE=32768
         WB_TPACKET_BLOCK_NR=64
-        WB_TPACKET_POLL_TIMEOUT_MS=3
+        WB_TPACKET_POLL_TIMEOUT_MS=0
         ;;
     normal)
         MODE_DESC="균형 (일반)"

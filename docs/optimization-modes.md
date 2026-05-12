@@ -128,7 +128,7 @@ wbridge
 | `WBRIDGE_TPACKET_RETIRE_TOV` | 1 | 1 | **5** | **10** | Block retire timeout (ms) |
 | `WBRIDGE_TPACKET_BLOCK_SIZE` | **8192** | 16384 | **32768** | **65536** | RX ring block 크기 (bytes, page-aligned). 작을수록 idle stall 감소 |
 | `WBRIDGE_TPACKET_BLOCK_NR` | **32** | 64 | 64 | **128** | RX ring block 개수. burst 흡수용, latency 무관 |
-| `WBRIDGE_TPACKET_POLL_TIMEOUT_MS` | 1 | 1 | **3** | **10** | poll() timeout (ms). 0이면 retire_tov×3 자동 |
+| `WBRIDGE_TPACKET_POLL_TIMEOUT_MS` | 1 | 1 | **0** | **0** | poll() timeout (ms). 0=auto(retire_tov×3). eco/thermal에서 빈 wake 회피 |
 | `WBRIDGE_RT_PRIORITY` | **80** | 50 | **40** | **30** | SCHED_FIFO 우선순위 (1~99) |
 
 > **참고:** TPACKET_V3 RX는 mmap zero-copy. 실시간성은 **block 크기 × retire_blk_tov**의 곱으로 결정됨 (block이 다 차거나 timeout 만료 시 user-space로 retire). `BLOCK_SIZE × BLOCK_NR`이 RX ring 총량으로, 작은 패킷의 idle traffic에서는 block이 안 차서 retire_tov 시간만큼 강제 stall 누적 → BLOCK_SIZE 축소가 latency 개선의 핵심 노브. TX_RING(TPACKET_V2)은 별도 매크로로 컴파일타임 고정(8MB).
