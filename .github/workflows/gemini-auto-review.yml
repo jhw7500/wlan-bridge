@@ -31,6 +31,6 @@ jobs:
       contents: read
       pull-requests: write
       id-token: write
-    uses: jhw7500/automation/.github/workflows/gemini-auto-review.yml@v1.23
+    uses: jhw7500/automation/.github/workflows/gemini-auto-review.yml@v1.28
     secrets:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}

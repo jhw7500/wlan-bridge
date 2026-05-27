@@ -31,6 +31,6 @@ jobs:
       contents: read
       pull-requests: write
       id-token: write
-    uses: jhw7500/automation/.github/workflows/opencode-auto-review.yml@v1.23
+    uses: jhw7500/automation/.github/workflows/opencode-auto-review.yml@v1.28
     secrets:
       OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
