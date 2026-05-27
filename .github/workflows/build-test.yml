@@ -4,14 +4,14 @@ on:
   push:
     branches: [ main, master ]
     paths:
-      - 'dumb/**'
+      - 'wbridge/**'
       - 'scripts/**'
       - '**/*.sh'
       - '.github/workflows/build-test.yml'
   pull_request:
     branches: [ main, master ]
     paths:
-      - 'dumb/**'
+      - 'wbridge/**'
       - 'scripts/**'
       - '**/*.sh'
       - '.github/workflows/build-test.yml'
@@ -25,7 +25,6 @@ on:
 jobs:
   check-enabled:
     name: Check if enabled
-    if: ${{ github.event.inputs.force_run != 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -42,15 +41,12 @@ jobs:
         uses: ./.github/actions/check-workflow-enabled
         with:
           workflow-name: build-test
+          force-run: ${{ github.event.inputs.force_run || 'false' }}
 
   build:
-    name: Build wlan-bridge
+    name: Build wbridge (host-native) + unit tests
     needs: check-enabled
-    if: >-
-      always() && (
-        github.event.inputs.force_run == 'true' ||
-        needs.check-enabled.outputs.enabled == 'true'
-      )
+    if: needs.check-enabled.outputs.enabled == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -66,68 +62,47 @@ jobs:
             build-essential \
             libpcap-dev
 
-      - name: Build dumb
+      - name: Build wbridge (release + debug + tests)
         run: |
           set -euo pipefail
+          make -C wbridge all
 
-          # Backward/forward compatible build:
-          # - Old Makefile: `make -C dumb` -> outputs to dumb/bin/
-          # - New Makefile: `make -C dumb release` / `debug` -> outputs to dumb/release/ and dumb/debug/
-          if make -C dumb -n release >/dev/null 2>&1; then
-            make -C dumb release
-          else
-            make -C dumb
-          fi
-
-          if make -C dumb -n debug >/dev/null 2>&1; then
-            make -C dumb debug
-          else
-            echo "No debug target in dumb/Makefile, skipping debug build"
-          fi
-
-      - name: Run refactored unit tests
+      - name: Run unit tests
         run: |
-          if [ -f dumb/refactored/Makefile ]; then
-            make -C dumb/refactored test
-          else
-            echo "No dumb/refactored/Makefile found, skipping"
-          fi
+          set -euo pipefail
+          make -C wbridge run-tests
 
       - name: Verify outputs
         run: |
           set -euo pipefail
-
-          # Determine release output directory.
-          if [ -f dumb/release/dumb ]; then
-            outdir="dumb/release"
-          elif [ -f dumb/bin/dumb ]; then
-            outdir="dumb/bin"
-          else
-            echo "ERROR: dumb binary not found (expected dumb/release/dumb or dumb/bin/dumb)" >&2
-            exit 1
-          fi
-
-          test -f "${outdir}/dumb"
-          test -f "${outdir}/dumb-tpacket"
-          file "${outdir}/dumb" "${outdir}/dumb-tpacket"
-
-          # Debug outputs are required only when a debug build target exists.
-          if make -C dumb -n debug >/dev/null 2>&1; then
-            test -f dumb/debug/dumb
-            test -f dumb/debug/dumb-tpacket
-            file dumb/debug/dumb dumb/debug/dumb-tpacket
-          fi
+          test -f wbridge/release/wbridge
+          test -f wbridge/release/wbridge-tpacket
+          test -f wbridge/debug/wbridge
+          test -f wbridge/debug/wbridge-tpacket
+          test -f wbridge/tests/bin/test_filter
+          file wbridge/release/wbridge wbridge/release/wbridge-tpacket
+          file wbridge/debug/wbridge wbridge/debug/wbridge-tpacket
 
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
           name: wlan-bridge-binaries
           path: |
-            dumb/release/dumb
-            dumb/release/dumb-tpacket
-            dumb/debug/dumb
-            dumb/debug/dumb-tpacket
-            dumb/bin/dumb
-            dumb/bin/dumb-tpacket
-          if-no-files-found: warn
+            wbridge/release/wbridge
+            wbridge/release/wbridge-tpacket
+            wbridge/debug/wbridge
+            wbridge/debug/wbridge-tpacket
+          if-no-files-found: error
           retention-days: 7
+
+  skipped:
+    name: Workflow Skipped
+    needs: check-enabled
+    if: needs.check-enabled.outputs.enabled != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notice
+        run: |
+          echo "::notice::build-test workflow is disabled in .github/workflow-config.yml"
+          echo "## Workflow Skipped" >> $GITHUB_STEP_SUMMARY
+          echo "build-test is disabled in workflow-config.yml" >> $GITHUB_STEP_SUMMARY
