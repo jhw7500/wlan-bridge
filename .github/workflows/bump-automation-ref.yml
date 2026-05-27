@@ -1,5 +1,23 @@
 name: Bump automation workflow refs
 
+# 현재 상태: workflows: write 권한 이슈로 자동 PR 생성 실패 (2026-05-27 기준).
+# 'Generate App token' 까지는 성공하지만 'Create PR' 단계의 git push가
+# `refusing to allow a GitHub App to create or update workflow ... without
+# workflows permission` 으로 거부됨. App 정의/installation에 workflows: write
+# 가 적용된 것처럼 보여도 effective하게 들어가지 않는 상태.
+#
+# 임시 운용: automation_ref 변경 시 다음 명령으로 수동 bump:
+#   NEW_REF=v1.29 python3 -c "
+#   import re,os
+#   from pathlib import Path
+#   p=re.compile(r'(jhw7500/automation/\.github/(?:workflows|actions)/[^@\s\\'\\\"]+@)v\d+(?:\.\d+)?')
+#   for f in sorted(Path('.github/workflows').rglob('*.yml')):
+#       t=f.read_text(); n=p.subn(r'\1'+os.environ['NEW_REF'],t)
+#       if n[1]: f.write_text(n[0]); print(f, n[1])"
+#   git add .github/workflows && git commit -m "chore: bump automation refs"
+#
+# 향후 해결: App workflows 권한 재인증 또는 PAT(classic) workflow scope 사용.
+
 on:
   push:
     branches:
