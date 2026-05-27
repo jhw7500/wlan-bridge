@@ -1,7 +1,10 @@
 # GitHub Actions Workflow Configuration
 #
 # This file controls enable/disable toggles for automatic workflows.
-# Workflows should default to enabled if this file is missing.
+# Workflows default to enabled if this file is missing.
+#
+# - enabled: workflow 자체 활성화 (false면 수동 트리거도 비활성)
+# - auto: PR 생성 시 자동 실행 여부 (없으면 해당 없음, 수동 트리거는 enabled만 체크)
 
 # Shared workflow version pin for jhw7500/automation.
 #
@@ -21,38 +24,53 @@ workflows:
   # Repo-specific CI workflows
   build-test:
     enabled: true
+    description: "Host-native build (wbridge release+debug) + unit tests"
   shellcheck:
     enabled: true
+    description: "ShellCheck (severity=warning) across all shell scripts"
 
   # Repo automation helpers
   bump-automation-ref:
     enabled: true
+    description: "automation_ref 변경 시 모든 uses: 참조 자동 업데이트 PR 생성"
 
   # Shared automation workflow wrappers
   auto-rereview-request:
     enabled: false
+    description: "PR 재push 시 reviewer 재요청 알림"
   # NOTE: review.auto=false이므로 자동 PR 리뷰 워크플로우는 비활성화.
   # 자동 리뷰를 사용하려면 review.auto=true로 변경하고 아래 워크플로우도 enabled: true로 설정.
   claude-code-review:
     enabled: false
+    description: "Claude 자동 PR 리뷰 (review.auto와 함께 활성화)"
   gemini-auto-review:
     enabled: false
+    description: "Gemini 자동 PR 리뷰 (review.auto와 함께 활성화)"
   gemini-dispatch:
     enabled: true
+    description: "Gemini 명령 dispatcher (issue/PR 이벤트 → invoke/review/triage 라우팅)"
   gemini-invoke:
     enabled: true
+    description: "Gemini CLI 직접 호출 (@gemini-cli ...)"
   gemini-review:
     enabled: true
+    description: "수동 PR 리뷰 (@gemini-cli /review)"
   gemini-scheduled-triage:
     enabled: false  # Disabled: 스케줄 트리거 비활성화
+    description: "issue triage 스케줄 실행 (시간당 비용 회피 위해 비활성)"
   gemini-triage:
     enabled: true
+    description: "issue triage 및 라벨링"
 
   opencode:
     enabled: true
+    description: "OpenCode 통합 (comment 트리거)"
   opencode-auto-review:
     enabled: false
+    description: "OpenCode 자동 PR 리뷰 (review.auto와 함께 활성화)"
   gemini-chat:
     enabled: true
+    description: "Gemini 대화형 응답 (@gemini-cli ...)"
   claude:
     enabled: true
+    description: "Claude AI 통합 (수동: @claude)"
