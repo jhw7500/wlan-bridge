@@ -113,10 +113,24 @@ jobs:
 
           git status --porcelain
 
+      # GITHUB_TOKEN은 workflows: write 권한이 없어 .github/workflows/*.yml
+      # 수정을 push할 수 없음. APP_ID/APP_PRIVATE_KEY로 GitHub App token을
+      # 발급해 workflows 권한을 가진 인증 컨텍스트를 확보한다.
+      - name: Generate App token
+        id: app-token
+        if: steps.ref.outputs.changed == 'true'
+        uses: actions/create-github-app-token@a8d616148505b5069dccd32f177bb87d7f39123b # ratchet:actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-workflows: write
+
       - name: Create PR
         if: steps.ref.outputs.changed == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           NEW_REF: ${{ steps.ref.outputs.new_ref }}
         run: |
           set -euo pipefail
@@ -129,6 +143,8 @@ jobs:
           branch="chore/bump-automation-${NEW_REF}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # actions/checkout 이 심어둔 GITHUB_TOKEN 기반 remote 인증을 App token으로 교체.
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
           git checkout -b "$branch"
           git add .github/workflows
           git commit -m "chore: bump automation refs to ${NEW_REF}"
