@@ -62,9 +62,10 @@ workflows:
     enabled: true
     description: "issue triage 및 라벨링"
 
+  # OPENCODE_API_KEY 미발급 상태이므로 비활성. 키 발급 후 enabled: true로 복귀.
   opencode:
-    enabled: true
-    description: "OpenCode 통합 (comment 트리거)"
+    enabled: false
+    description: "OpenCode 통합 (comment 트리거) — API 키 발급 시 enabled: true"
   opencode-auto-review:
     enabled: false
     description: "OpenCode 자동 PR 리뷰 (review.auto와 함께 활성화)"
