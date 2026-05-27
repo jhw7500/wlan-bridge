@@ -24,8 +24,9 @@ ssh "$REMOTE" "
   git fetch $REMOTE_BUNDLE $BRANCH
   git checkout $BRANCH
   git reset --hard FETCH_HEAD
-  make -C dumb
-  cp dumb/dumb /usr/local/bin/ -f
+  make -C wbridge release
+  cp wbridge/release/wbridge /usr/local/bin/ -f
+  cp wbridge/release/wbridge-tpacket /usr/local/bin/ -f
 "
 
 echo "done."
