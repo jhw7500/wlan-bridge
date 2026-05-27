@@ -1,7 +1,6 @@
 #!/bin/bash
 set -euo pipefail
 
-TAG=$(basename "$0")
 IFACE="${1:-mlan0}"
 SVC="wifi_bridge@${IFACE}.service"
 DEFAULT_CFG="/etc/default/wbridge"

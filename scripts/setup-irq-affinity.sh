@@ -14,7 +14,6 @@ set -e
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
 NC='\033[0m'
 
 TAG="setup-irq-affinity"
@@ -438,7 +437,6 @@ if [ "$MODE" = "eco" ] || [ "$MODE" = "thermal" ]; then
     if [ "$CPUFREQ_SUPPORTED" = "yes" ]; then
         PREV_GOVERNOR=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo "unknown")
         if [ "$MODE" = "eco" ]; then
-            TARGET_GOVERNOR="conservative"
             for cpu_gov in /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_governor; do
                 echo conservative > "$cpu_gov" 2>/dev/null || true
             done
@@ -448,7 +446,6 @@ if [ "$MODE" = "eco" ] || [ "$MODE" = "thermal" ]; then
             fi
             log_info "[cpufreq] eco: $PREV_GOVERNOR → conservative (up=80, down=20)"
         else
-            TARGET_GOVERNOR="powersave"
             for cpu_gov in /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_governor; do
                 echo powersave > "$cpu_gov" 2>/dev/null || true
             done
