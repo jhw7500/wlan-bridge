@@ -127,6 +127,28 @@ jobs:
           permission-pull-requests: write
           permission-workflows: write
 
+      # DEBUG: App token이 실제로 어떤 권한을 갖는지 출력.
+      # workflows write 권한 누락 시 git push가 거부되는 문제 진단용. 검증 후 제거.
+      - name: Debug App token permissions
+        if: steps.ref.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set +e
+          echo "=== Token user/installation context ==="
+          curl -sS -H "Authorization: Bearer ${GH_TOKEN}" \
+               -H "Accept: application/vnd.github+json" \
+               https://api.github.com/installation/repositories | head -40
+          echo ""
+          echo "=== App slug from token (via /app) ==="
+          curl -sS -H "Authorization: Bearer ${GH_TOKEN}" \
+               -H "Accept: application/vnd.github+json" \
+               https://api.github.com/app | head -20
+          echo ""
+          echo "=== App-token outputs.app-slug ==="
+          echo "app-slug: ${{ steps.app-token.outputs.app-slug }}"
+          echo "installation-id: ${{ steps.app-token.outputs.installation-id }}"
+
       - name: Create PR
         if: steps.ref.outputs.changed == 'true'
         env:
