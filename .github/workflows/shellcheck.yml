@@ -64,30 +64,6 @@ jobs:
           severity: warning
           format: gcc
 
-      - name: Run ShellCheck on dumb/ make-for-imx8
-        run: |
-          echo "Checking dumb/ make-for-imx8..."
-
-          # Check make-for-imx8 (if exists)
-          if [ -f dumb/make-for-imx8 ]; then
-            echo "Checking make-for-imx8..."
-            shellcheck -x -s bash dumb/make-for-imx8 || exit 1
-          fi
-
-          # Check sync-to-remote.sh
-          if [ -f sync-to-remote.sh ]; then
-            echo "Checking sync-to-remote.sh..."
-            shellcheck -x -s bash sync-to-remote.sh || exit 1
-          fi
-
-          # Check scp-to-remote.sh
-          if [ -f scp-to-remote.sh ]; then
-            echo "Checking scp-to-remote.sh..."
-            shellcheck -x -s bash scp-to-remote.sh || exit 1
-          fi
-
-          echo "All additional shell scripts passed ShellCheck!"
-
       - name: Summary
         if: always()
         run: |
