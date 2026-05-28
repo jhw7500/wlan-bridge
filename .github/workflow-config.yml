@@ -41,8 +41,9 @@ workflows:
   # NOTE: review.auto=false이므로 자동 PR 리뷰 워크플로우는 비활성화.
   # 자동 리뷰를 사용하려면 review.auto=true로 변경하고 아래 워크플로우도 enabled: true로 설정.
   claude-code-review:
-    enabled: false
-    description: "Claude 자동 PR 리뷰 (review.auto와 함께 활성화)"
+    enabled: true
+    auto: true
+    description: "Claude 자동 PR 리뷰 (per-workflow auto 명시: review.auto와 독립)"
   gemini-auto-review:
     enabled: false
     description: "Gemini 자동 PR 리뷰 (review.auto와 함께 활성화)"
