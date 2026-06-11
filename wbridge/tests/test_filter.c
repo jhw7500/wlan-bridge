@@ -100,6 +100,18 @@ static void create_test_packet_ipv4(struct packet_info *pkt,
     pkt->l2_payload_len = sizeof(ip);
 }
 
+// Test helper: packet with arbitrary ethertype + dst MAC
+// (filter는 packet_parse가 802.1Q를 벗긴 inner ethertype을 보므로,
+//  여기서 ethertype을 직접 지정하면 VLAN-tagged 케이스도 등가로 검증됨)
+static void create_test_packet_proto(struct packet_info *pkt,
+                                     const uint8_t dst_mac[ETH_ALEN],
+                                     int is_multicast,
+                                     uint16_t ethertype)
+{
+    create_test_packet_mac(pkt, dst_mac, is_multicast);
+    pkt->ethertype = ethertype;
+}
+
 //
 // TEST CASES
 //
@@ -308,6 +320,68 @@ void test_filter_disabled_forwards_all(void) {
     printf("  ✓ PASS\n");
 }
 
+void test_eapol_never_forwarded(void) {
+    printf("TEST: EAPOL (802.1X) must never be bridged, even with filters off\n");
+
+    struct bridge_config cfg = create_test_config(0, 0); // ALL filters OFF
+    struct bridge_interface ifaces[BRIDGE_IF_COUNT];
+
+    uint8_t mac0[] = {0x00, 0x11, 0x22, 0x33, 0x44, 0x55};
+    uint8_t mac1[] = {0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff};
+    setup_test_interface(&ifaces[0], "eth0", mac0, NULL);
+    setup_test_interface(&ifaces[1], "eth1", mac1, NULL);
+
+    struct packet_filter filter;
+    filter_init(&filter, &cfg, ifaces);
+
+    // Unicast EAPOL — 4-way handshake 프레임은 STA unicast MAC으로 옴
+    uint8_t sta_mac[] = {0x90, 0x2c, 0xfb, 0x00, 0xf0, 0x89};
+    struct packet_info pkt;
+    create_test_packet_proto(&pkt, sta_mac, 0, ETH_P_PAE);
+    assert(filter_should_drop(&filter, &pkt, BRIDGE_IF0) == 1);
+
+    // Group-addressed EAPOL (01:80:C2:00:00:03)
+    uint8_t pae_group[] = {0x01, 0x80, 0xC2, 0x00, 0x00, 0x03};
+    create_test_packet_proto(&pkt, pae_group, 1, ETH_P_PAE);
+    assert(filter_should_drop(&filter, &pkt, BRIDGE_IF0) == 1);
+
+    printf("  ✓ PASS\n");
+}
+
+void test_8021d_link_local_never_forwarded(void) {
+    printf("TEST: 802.1D link-local (STP/LLDP) must never be bridged\n");
+
+    struct bridge_config cfg = create_test_config(0, 0); // ALL filters OFF
+    struct bridge_interface ifaces[BRIDGE_IF_COUNT];
+
+    uint8_t mac0[] = {0x00, 0x11, 0x22, 0x33, 0x44, 0x55};
+    uint8_t mac1[] = {0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff};
+    setup_test_interface(&ifaces[0], "eth0", mac0, NULL);
+    setup_test_interface(&ifaces[1], "eth1", mac1, NULL);
+
+    struct packet_filter filter;
+    filter_init(&filter, &cfg, ifaces);
+
+    struct packet_info pkt;
+
+    // STP BPDU (01:80:C2:00:00:00) — MAC 기반 차단이라 ethertype 무관
+    uint8_t stp[] = {0x01, 0x80, 0xC2, 0x00, 0x00, 0x00};
+    create_test_packet_proto(&pkt, stp, 1, ETH_P_IP);
+    assert(filter_should_drop(&filter, &pkt, BRIDGE_IF0) == 1);
+
+    // LLDP (01:80:C2:00:00:0E)
+    uint8_t lldp[] = {0x01, 0x80, 0xC2, 0x00, 0x00, 0x0E};
+    create_test_packet_proto(&pkt, lldp, 1, ETH_P_IP);
+    assert(filter_should_drop(&filter, &pkt, BRIDGE_IF0) == 1);
+
+    // 경계 검증: 01:80:C2:00:00:10 은 범위 밖 → 포워딩되어야 함
+    uint8_t outside[] = {0x01, 0x80, 0xC2, 0x00, 0x00, 0x10};
+    create_test_packet_proto(&pkt, outside, 1, ETH_P_IP);
+    assert(filter_should_drop(&filter, &pkt, BRIDGE_IF0) == 0);
+
+    printf("  ✓ PASS\n");
+}
+
 //
 // TEST RUNNER
 //
@@ -325,6 +399,8 @@ int main(void) {
     test_ip_filter_forwards_remote_ip();
     test_ip_filter_forwards_ipv4_multicast();
     test_filter_disabled_forwards_all();
+    test_eapol_never_forwarded();
+    test_8021d_link_local_never_forwarded();
 
     printf("\n========================================\n");
     printf("  All tests PASSED ✓\n");

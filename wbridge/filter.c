@@ -38,6 +38,25 @@ static void filter_debug_log_impl(const char *file, int line, const char *fmt, .
 #define filter_debug_log(fmt, ...) \
     filter_debug_log_impl(__FILE__, __LINE__, fmt, ##__VA_ARGS__)
 
+// 802.1X EAPOL ethertype — 일부 libc 헤더에 없을 수 있어 fallback 정의
+#ifndef ETH_P_PAE
+#define ETH_P_PAE 0x888E
+#endif
+
+/**
+ * IEEE 802.1D Bridge Group Address: 01:80:C2:00:00:00 .. 01:80:C2:00:00:0F
+ * (STP BPDU, LACP, 802.1X group, LLDP 등 link-local 프로토콜 목적지).
+ * 802.1D-2004 §7.12.6: 브릿지는 이 범위를 절대 포워딩하면 안 된다 —
+ * 포워딩 시 토폴로지 루프 형성 또는 STP 혼란 유발.
+ * (moal_bridge_is_link_local()과 동일 범위 — 엔진 간 패리티)
+ */
+static int dst_is_8021d_link_local(const struct packet_info *pkt)
+{
+    const uint8_t *d = pkt->eth->h_dest;
+    return d[0] == 0x01 && d[1] == 0x80 && d[2] == 0xC2 &&
+           d[3] == 0x00 && d[4] == 0x00 && (d[5] & 0xF0) == 0x00;
+}
+
 void filter_init(struct packet_filter *filter,
                 const struct bridge_config *config,
                 const struct bridge_interface *interfaces)
@@ -191,6 +210,28 @@ int filter_should_drop(const struct packet_filter *filter,
 {
     if (!filter || !pkt || !bridge_interface_valid(iface_idx)) {
         return 1; // Drop invalid packets
+    }
+
+    // 802.1X EAPOL (0x888E): 포트-로컬 프로토콜 — 절대 브릿징하지 않는다.
+    // 4-way handshake 프레임은 unicast(STA MAC)로도 오므로 ethertype으로 판정.
+    // packet_parse가 802.1Q를 벗긴 inner ethertype이라 VLAN-tagged도 잡힘.
+    // enable_* 플래그와 무관하게 무조건 적용 (안전 불변식 — moal 가드 패리티).
+    if (pkt->ethertype == ETH_P_PAE) {
+        if (filter->config->enable_debug_log) {
+            filter_debug_log("eapol-filter: dropped EAPOL frame (never bridged)");
+        }
+        return 1;
+    }
+
+    // IEEE 802.1D link-local (01:80:C2:00:00:00..0F): 절대 포워딩 금지 —
+    // STP/LACP/LLDP. EAPOL group 주소(:03)도 이 범위에 포함된다.
+    // enable_* 플래그와 무관하게 무조건 적용.
+    if (dst_is_8021d_link_local(pkt)) {
+        if (filter->config->enable_debug_log) {
+            filter_debug_log("ll-filter: dropped 802.1D link-local frame "
+                             "(dst 01:80:C2:00:00:%02x)", pkt->eth->h_dest[5]);
+        }
+        return 1;
     }
 
     // L2 bridge principle: Always forward multicast/broadcast
