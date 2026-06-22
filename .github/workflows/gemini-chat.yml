@@ -43,6 +43,6 @@ jobs:
       issues: write
       id-token: write
       actions: read
-    uses: jhw7500/automation/.github/workflows/gemini-chat.yml@v1.30
+    uses: jhw7500/automation/.github/workflows/gemini-chat.yml@v1.31
     secrets:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
