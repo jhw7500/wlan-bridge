@@ -11,7 +11,10 @@
 #include "filter.h"
 #include <pcap/pcap.h>
 #include <errno.h>
+#include <string.h>
 #include <syslog.h>
+#include <sys/socket.h>
+#include <linux/if_packet.h>
 
 // Forward declaration for context access
 extern struct bridge_context *g_bridge_context;
@@ -23,7 +26,7 @@ int bridge_packet_forward(struct bridge_context *ctx,
 
 void bridge_log_inject_error(struct bridge_context *ctx,
                              bridge_interface_t iface_idx,
-                             int inject_result);
+                             int err_no);
 
 void bridge_log_partial_inject(struct bridge_context *ctx,
                                bridge_interface_t iface_idx,
@@ -98,21 +101,34 @@ int bridge_packet_forward(struct bridge_context *ctx,
     struct bridge_interface *iface = &ctx->interfaces[iface_idx];
 
     // Check if peer interface is ready
-    if (!atomic_load(&iface->ready) || !iface->tx_handle) {
+    if (!atomic_load(&iface->ready) || iface->tx_fd < 0) {
         return -1; // Not ready yet
     }
 
+    // 송신 전용 소켓은 bind 하지 않으므로 목적지 인터페이스를 매 프레임 지정한다.
+    // SOCK_RAW 는 프레임(이더넷 헤더 포함)을 그대로 전송하므로 sll_ifindex 만
+    // 필수지만, tpacket 엔진과 동일하게 protocol/dest MAC 도 채워둔다.
+    struct sockaddr_ll dst;
+    memset(&dst, 0, sizeof(dst));
+    dst.sll_family   = AF_PACKET;
+    dst.sll_protocol = pkt->eth->h_proto;
+    dst.sll_ifindex  = iface->ifindex;
+    dst.sll_halen    = ETH_ALEN;
+    memcpy(dst.sll_addr, pkt->eth->h_dest, ETH_ALEN);
+
     // Inject packet (forward captured length, not original length)
-    int ret = pcap_inject(iface->tx_handle, pkt->data, pkt->caplen);
+    ssize_t ret = sendto(iface->tx_fd, pkt->data, pkt->caplen, 0,
+                         (struct sockaddr *)&dst, sizeof(dst));
 
     // Retry once on ENOBUFS (transient buffer exhaustion)
     if (ret < 0 && errno == ENOBUFS) {
-        ret = pcap_inject(iface->tx_handle, pkt->data, pkt->caplen);
+        ret = sendto(iface->tx_fd, pkt->data, pkt->caplen, 0,
+                     (struct sockaddr *)&dst, sizeof(dst));
     }
 
     // Check for errors
     if (ret < 0) {
-        bridge_log_inject_error(ctx, iface_idx, ret);
+        bridge_log_inject_error(ctx, iface_idx, errno);
         return -1;
     }
 
@@ -130,7 +146,7 @@ int bridge_packet_forward(struct bridge_context *ctx,
  */
 void bridge_log_inject_error(struct bridge_context *ctx,
                              bridge_interface_t iface_idx,
-                             int inject_result)
+                             int err_no)
 {
     if (!ctx->config.enable_debug_log) {
         return;
@@ -146,9 +162,8 @@ void bridge_log_inject_error(struct bridge_context *ctx,
     long prev = atomic_load(&last_log_time);
     if (count == 1 || (prev > 0 && now > prev)) {
         struct bridge_interface *iface = &ctx->interfaces[iface_idx];
-        const char *err = pcap_geterr(iface->tx_handle);
-        SLOG(LOG_ERR, "pcap_inject failed on if%d (%s): %s (errors: %lu)",
-               iface_idx, iface->name, err ? err : "unknown", count);
+        SLOG(LOG_ERR, "sendto failed on if%d (%s): %s (errors: %lu)",
+               iface_idx, iface->name, strerror(err_no), count);
         atomic_store(&last_log_time, now);
     }
 }

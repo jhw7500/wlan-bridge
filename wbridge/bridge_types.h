@@ -112,7 +112,10 @@ struct dispatch_counters {
 struct bridge_interface {
     char name[IFNAMSIZ];
     pcap_t *rx_handle;
-    pcap_t *tx_handle;
+    // 송신 전용 raw AF_PACKET 소켓(SOCK_RAW, protocol=0). protocol=0 이라
+    // ptype_all 등록이 없어 RX 링/skb clone 비용이 0. sendto() 로만 사용.
+    int tx_fd;
+    int ifindex;   // sendto() 의 sll_ifindex 지정용
     pthread_t thread;
     uint8_t mac[ETH_ALEN];
     uint32_t ipv4;
