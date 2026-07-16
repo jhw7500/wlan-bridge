@@ -387,10 +387,14 @@ static inline struct tpacket2_hdr *tx_frame_ptr(const struct interface *iface, u
     return (struct tpacket2_hdr *)((uint8_t *)iface->ring_tx + (frame_idx * iface->tx_req.tp_frame_size));
 }
 
-static inline int tx_frame_is_available(const struct tpacket2_hdr *hdr)
+static inline int tx_frame_is_available(struct tpacket2_hdr *hdr)
 {
-    // kernel doc / selftests: availability is "not (SEND_REQUEST|SENDING)"
-    return !(hdr->tp_status & (TP_STATUS_SEND_REQUEST | TP_STATUS_SENDING));
+    // kernel doc / selftests: availability is "not (SEND_REQUEST|SENDING)".
+    // acquire 로드: 커널이 이전 전송을 완료하고 슬롯을 반납한 것을 관찰한 뒤
+    // 재사용한다. ARM(weak-memory) 타깃에서 슬롯 재사용이 완료 관찰보다
+    // 앞당겨지는 것을 막는다.
+    __u32 status = __atomic_load_n(&hdr->tp_status, __ATOMIC_ACQUIRE);
+    return !(status & (TP_STATUS_SEND_REQUEST | TP_STATUS_SENDING));
 }
 
 static int tx_ring_enqueue(unsigned int tx_idx, struct interface *tx_iface, const uint8_t *pkt, uint32_t pkt_len)
@@ -418,7 +422,9 @@ static int tx_ring_enqueue(unsigned int tx_idx, struct interface *tx_iface, cons
     memcpy(data, pkt, pkt_len);
     hdr->tp_len = pkt_len;
     hdr->tp_snaplen = pkt_len;
-    hdr->tp_status = TP_STATUS_SEND_REQUEST;
+    // release 스토어: 커널이 TP_STATUS_SEND_REQUEST 를 관찰하기 전에 프레임
+    // 데이터·길이가 먼저 보이도록 보장한다(그 전에 미완성 프레임 전송 방지).
+    __atomic_store_n(&hdr->tp_status, TP_STATUS_SEND_REQUEST, __ATOMIC_RELEASE);
 
     // 다음 프레임으로
     tx_iface->tx_frame_idx = (tx_iface->tx_frame_idx + 1) % tx_iface->tx_req.tp_frame_nr;
@@ -490,8 +496,12 @@ static void *interface_thread(void *arg) {
         struct tpacket_block_desc *pbd = (struct tpacket_block_desc *)
             ((uint8_t *)rx_iface->ring_rx + (size_t)block_idx * tpacket_block_size);
 
-        // Block이 사용자 공간에서 사용 가능한지 확인
-        if ((pbd->hdr.bh1.block_status & TP_STATUS_USER) == 0) {
+        // Block이 사용자 공간에서 사용 가능한지 확인.
+        // acquire 로드: block_status 관찰 이후의 블록 디스크립터(num_pkts,
+        // offset_to_first_pkt)·페이로드 읽기가 상태 확인보다 앞당겨지지 않게 한다.
+        // 커널 producer 는 다른 코어(NAPI/softirq)일 수 있고 타깃은 ARM(weak-memory)
+        // + -O3 -flto 라 배리어 없이는 미완성 블록을 읽을 수 있다.
+        if ((__atomic_load_n(&pbd->hdr.bh1.block_status, __ATOMIC_ACQUIRE) & TP_STATUS_USER) == 0) {
             continue;
         }
 
@@ -612,8 +622,10 @@ static void *interface_thread(void *arg) {
             }
         }
 
-        // Block을 커널에 반환
-        pbd->hdr.bh1.block_status = TP_STATUS_KERNEL;
+        // Block을 커널에 반환. release 스토어: 블록 내 모든 읽기가 완료된 뒤에야
+        // 커널이 TP_STATUS_KERNEL 을 관찰하도록 보장한다(그 전에 커널이 블록을
+        // refill 하여 읽는 중인 데이터를 덮어쓰는 것을 방지).
+        __atomic_store_n(&pbd->hdr.bh1.block_status, TP_STATUS_KERNEL, __ATOMIC_RELEASE);
         block_idx = (block_idx + 1) % rx_iface->req.tp_block_nr;
     }
 
