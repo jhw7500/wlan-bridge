@@ -387,13 +387,16 @@ static inline struct tpacket2_hdr *tx_frame_ptr(const struct interface *iface, u
     return (struct tpacket2_hdr *)((uint8_t *)iface->ring_tx + (frame_idx * iface->tx_req.tp_frame_size));
 }
 
-static inline int tx_frame_is_available(struct tpacket2_hdr *hdr)
+static inline int tx_frame_is_available(const struct tpacket2_hdr *hdr)
 {
     // kernel doc / selftests: availability is "not (SEND_REQUEST|SENDING)".
     // acquire 로드: 커널이 이전 전송을 완료하고 슬롯을 반납한 것을 관찰한 뒤
     // 재사용한다. ARM(weak-memory) 타깃에서 슬롯 재사용이 완료 관찰보다
     // 앞당겨지는 것을 막는다.
-    __u32 status = __atomic_load_n(&hdr->tp_status, __ATOMIC_ACQUIRE);
+    // tp_status/block_status는 커널 UAPI 타입(__u32, 비 _Atomic)이라 C11
+    // atomic_load_explicit을 직접 쓸 수 없어 GCC __atomic 빌트인으로 ordering을 건다.
+    // 읽기 전용 함수라 const 계약을 유지하고 (__u32 *)로만 캐스트한다(값은 쓰지 않음).
+    __u32 status = __atomic_load_n((__u32 *)&hdr->tp_status, __ATOMIC_ACQUIRE);
     return !(status & (TP_STATUS_SEND_REQUEST | TP_STATUS_SENDING));
 }
 
