@@ -35,9 +35,8 @@ jobs:
       )
     permissions:
       contents: read
-      issues: write
       pull-requests: write
-      id-token: write
-    uses: jhw7500/automation/.github/workflows/opencode.yml@v1.31
+      issues: write
+    uses: jhw7500/automation/.github/workflows/opencode.yml@v1.36
     secrets:
-      OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+      ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
