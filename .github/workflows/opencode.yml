@@ -16,7 +16,7 @@ jobs:
       enabled: ${{ steps.check.outputs.enabled }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           sparse-checkout: .github
 
@@ -37,6 +37,6 @@ jobs:
       contents: read
       pull-requests: write
       issues: write
-    uses: jhw7500/automation/.github/workflows/opencode.yml@v1.36
+    uses: jhw7500/automation/.github/workflows/opencode.yml@v1.39
     secrets:
       ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
