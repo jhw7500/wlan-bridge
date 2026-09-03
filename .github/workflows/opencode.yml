@@ -12,6 +12,6 @@ jobs:
       contents: read
       issues: write
       pull-requests: write
-    uses: jhw7500/automation/.github/workflows/opencode.yml@49cd25b554a086e9f8684ee7c45171699ff824e1
+    uses: jhw7500/automation/.github/workflows/opencode.yml@a2c3ca4c6de37150ec174e897cce3dfb2e0c370c
     secrets:
       ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
